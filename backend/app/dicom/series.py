@@ -197,6 +197,22 @@ def _slice_spacing_warnings(z: np.ndarray, spacing: float) -> list[str]:
     return [f"Non-uniform slice spacing: steps range {steps.min():.3f}-{steps.max():.3f} mm"]
 
 
+def _pixel_spacing(ds: Dataset, path: Path) -> tuple[float, float] | None:
+    if "PixelSpacing" not in ds:
+        return None
+    try:
+        values = np.asarray(ds.PixelSpacing, dtype=float)
+    except (TypeError, ValueError):
+        raise SeriesValidationError(
+            "invalid_pixel_spacing", f"{path.name}: PixelSpacing must contain two numbers"
+        ) from None
+    if values.shape != (2,) or not np.isfinite(values).all() or (values <= 0).any():
+        raise SeriesValidationError(
+            "invalid_pixel_spacing", f"{path.name}: PixelSpacing must contain two finite, positive values"
+        )
+    return float(values[0]), float(values[1])
+
+
 def read_series_headers(directory: Path) -> SeriesInfo:
     """Index one DICOM directory. Raises SeriesValidationError with a user-facing reason."""
     if not directory.is_dir():
@@ -286,9 +302,15 @@ def read_series_headers(directory: Path) -> SeriesInfo:
         )
     spacing = float(np.median(np.diff(z)))
 
-    pixel_spacing = None
-    if "PixelSpacing" in first and len(first.PixelSpacing) == 2:
-        pixel_spacing = (float(first.PixelSpacing[0]), float(first.PixelSpacing[1]))
+    pixel_spacing = _pixel_spacing(first, items[0][0])
+    for path, ds in items[1:]:
+        current_spacing = _pixel_spacing(ds, path)
+        if (current_spacing is None) != (pixel_spacing is None) or (
+            pixel_spacing is not None
+            and current_spacing is not None
+            and not np.allclose(current_spacing, pixel_spacing, rtol=1e-5, atol=1e-6)
+        ):
+            raise SeriesValidationError("inconsistent_geometry", f"Slice {path.name} has a different PixelSpacing")
 
     warnings = _slice_spacing_warnings(z, spacing)
     modality = _str(first.get("Modality"))

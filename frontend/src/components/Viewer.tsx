@@ -1,7 +1,8 @@
-import { type FormEvent, useEffect, useRef, useState } from "react";
+import { type FormEvent, useEffect, useState } from "react";
 import { api } from "../api";
 import { useDebounced, usePolling } from "../hooks";
-import type { Located, Series, SeriesDetail } from "../types";
+import { locateSlice, type SliceLocation } from "../location";
+import type { Series, SeriesDetail } from "../types";
 import { ErrorBox, StatusBadge, mm } from "./common";
 import { AnalysisPanel, MetadataTable } from "./SeriesInfo";
 
@@ -15,6 +16,30 @@ const PRESETS = [
 
 type Mode = "mm" | "index";
 
+/** Reading-room style text on the image: corners TL, TR, BL, BR; orientation letters top, right, bottom, left. */
+function Overlay({ corners, markers }: { corners: (string[] | null)[]; markers: string[] }) {
+  return (
+    <div className="overlay" aria-hidden="true">
+      {corners.map((lines, i) =>
+        lines ? (
+          <div key={i} className={`corner c${i}`}>
+            {lines.filter(Boolean).map((l, j) => (
+              <div key={j} className={i === 3 && j === 1 ? "z" : undefined}>
+                {l}
+              </div>
+            ))}
+          </div>
+        ) : null,
+      )}
+      {markers.map((m, i) => (
+        <span key={i} className={`marker m${i}`}>
+          {m}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 interface Props {
   seriesId: number | null;
   onSelectSeries: (id: number) => void;
@@ -22,14 +47,22 @@ interface Props {
 
 export function Viewer({ seriesId, onSelectSeries }: Props) {
   const [seriesList, setSeriesList] = useState<Series[]>([]);
-  const [series, setSeries] = useState<SeriesDetail | null>(null);
+  const [loadedSeries, setSeries] = useState<SeriesDetail | null>(null);
+  const series = loadedSeries?.id === seriesId ? loadedSeries : null;
+  const [listOffset, setListOffset] = useState(0);
+  const [total, setTotal] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const [mode, setMode] = useState<Mode>("mm");
   const [input, setInput] = useState("");
-  const [located, setLocated] = useState<Located | null>(null);
+  const [selection, setSelection] = useState<{ seriesId: number; by: SliceLocation } | null>(null);
   const [locateError, setLocateError] = useState<string | null>(null);
-  const requestId = useRef(0);
+  let by: SliceLocation = { index: Math.floor((series?.num_slices ?? 0) / 2) };
+  if (series && selection?.seriesId === series.id) {
+    by = "index" in selection.by
+      ? { index: Math.min(selection.by.index, series.slices.length - 1) } : selection.by;
+  }
+  const located = series?.slices.length ? locateSlice(series, by) : null;
 
   const [width, setWidth] = useState(400);
   const [level, setLevel] = useState(40);
@@ -39,60 +72,58 @@ export function Viewer({ seriesId, onSelectSeries }: Props) {
   const windowing = { width: debouncedWidth, level: debouncedLevel };
 
   useEffect(() => {
+    const controller = new AbortController();
     api
-      .searchSeries({})
+      .searchSeries({ offset: listOffset }, controller.signal)
       .then((r) => {
+        if (controller.signal.aborted) return;
         setSeriesList(r.items);
+        setTotal(r.total);
         if (seriesId === null && r.items.length > 0) onSelectSeries(r.items[0].id);
       })
-      .catch((e) => setError(e.message));
-    // Load the list once per visit to the tab.
-  }, []);
+      .catch((e) => { if (!controller.signal.aborted) setError(e.message); });
+    return () => controller.abort();
+  }, [listOffset, seriesId]);
 
   // Load the series; keep polling while its analysis (sagittal view) is still pending.
   const analysisPending = series !== null && series.id === seriesId && series.status === "indexed";
   usePolling(
-    async () => {
+    async (signal) => {
       if (seriesId === null) return;
       try {
-        setSeries(await api.getSeries(seriesId));
+        const result = await api.getSeries(seriesId, signal);
+        if (signal.aborted) return;
+        setSeries(result);
         setError(null);
       } catch (e) {
-        setError((e as Error).message);
+        if (!signal.aborted) setError((e as Error).message);
       }
     },
     analysisPending ? 2000 : null,
     [seriesId],
   );
 
-  async function goTo(by: { z: number } | { index: number }) {
-    if (seriesId === null) return;
-    const id = ++requestId.current; // drop answers that arrive after a newer request
+  function goTo(by: SliceLocation) {
+    if (!series) return;
     try {
-      const result = await api.locate(seriesId, by);
-      if (id !== requestId.current) return;
-      setLocated(result);
+      locateSlice(series, by); // validate before updating the selection
+      setSelection({ seriesId: series.id, by });
       setLocateError(null);
     } catch (e) {
-      if (id === requestId.current) setLocateError((e as Error).message);
+      setLocateError((e as Error).message);
     }
   }
 
-  // Open each new series at its middle slice.
-  const loadedId = series?.id;
   useEffect(() => {
-    if (!series) return;
-    const middle = Math.floor(series.num_slices / 2);
-    setLocated(null);
-    setInput(mode === "index" ? String(middle) : "");
-    void goTo({ index: middle });
-    // Only when a different series is loaded, not on every refresh of the same one.
-  }, [loadedId]);
+    setInput("");
+    setLocateError(null);
+    setError(null);
+  }, [seriesId]);
 
   function submit(event: FormEvent) {
     event.preventDefault();
     const value = Number(input);
-    if (input.trim() === "" || Number.isNaN(value)) {
+    if (input.trim() === "" || !Number.isFinite(value)) {
       setLocateError(mode === "mm" ? "Enter a location in mm" : "Enter a slice index");
       return;
     }
@@ -128,7 +159,7 @@ export function Viewer({ seriesId, onSelectSeries }: Props) {
       ? `${series.columns * series.pixel_spacing_col} / ${series.rows * series.pixel_spacing_row}`
       : undefined;
 
-  if (seriesList.length === 0 && !error) {
+  if (total === 0 && !series && !error) {
     return (
       <div className="card empty">
         <h2>No series yet</h2>
@@ -144,12 +175,21 @@ export function Viewer({ seriesId, onSelectSeries }: Props) {
         <label className="field grow">
           <span>Series</span>
           <select value={seriesId ?? ""} onChange={(e) => onSelectSeries(Number(e.target.value))}>
+            {seriesId === null && <option value="" disabled>Choose a series</option>}
+            {seriesId !== null && !seriesList.some((s) => s.id === seriesId) && (
+              <option value={seriesId}>#{seriesId} · {series?.series_description ?? "Selected series"}</option>
+            )}
             {seriesList.map((s) => (
               <option key={s.id} value={s.id}>
                 #{s.id} · {s.study_description ?? "—"} · {s.series_description ?? "—"} ({s.num_slices} slices)
               </option>
             ))}
           </select>
+          {total !== null && total > 50 && <span>
+            <button type="button" disabled={listOffset === 0} onClick={() => setListOffset(Math.max(0, listOffset - 50))}>Previous series</button>
+            {" "}{listOffset + 1}–{Math.min(listOffset + 50, total)} of {total}{" "}
+            <button type="button" disabled={listOffset + 50 >= total} onClick={() => setListOffset(listOffset + 50)}>More series</button>
+          </span>}
         </label>
 
         <form className="locate" onSubmit={submit}>
@@ -175,7 +215,7 @@ export function Viewer({ seriesId, onSelectSeries }: Props) {
             }
             aria-label={mode === "mm" ? "Location in millimetres" : "Slice index"}
           />
-          <button type="submit" className="primary">
+          <button type="submit" className="primary" disabled={!series}>
             Show
           </button>
         </form>
@@ -246,7 +286,7 @@ export function Viewer({ seriesId, onSelectSeries }: Props) {
 
       {series && located && (
         <div className="panels">
-          <figure className="card">
+          <figure className="viewport">
             <figcaption>Axial</figcaption>
             <div className="image-box">
               {axialFailed === axialSrc ? (
@@ -259,11 +299,20 @@ export function Viewer({ seriesId, onSelectSeries }: Props) {
                   onError={() => setAxialFailed(axialSrc)}
                 />
               )}
+              <Overlay
+                corners={[
+                  [series.patient_id ?? "", series.study_description ?? ""],
+                  [series.series_description ?? "", series.modality ?? ""],
+                  [`W ${windowing.width}  L ${windowing.level}`, preset === "custom" ? "" : preset],
+                  [`Slice ${located.index} (0–${located.num_slices - 1})`, `z ${mm(located.z)}`],
+                ]}
+                markers={["A", "L", "P", "R"]}
+              />
             </div>
           </figure>
-          <figure className="card">
+          <figure className="viewport">
             <figcaption>
-              Sagittal (mid-volume) <StatusBadge status={series.status} />
+              Sagittal, mid-volume <StatusBadge status={series.status} />
             </figcaption>
             {series.status === "ready" && series.analysis ? (
               <div className="image-box">
@@ -278,6 +327,7 @@ export function Viewer({ seriesId, onSelectSeries }: Props) {
                     </div>
                   )}
                 </div>
+                <Overlay corners={[null, null, [`W ${windowing.width}  L ${windowing.level}`], null]} markers={["S", "P", "I", "A"]} />
               </div>
             ) : (
               <div className="placeholder">

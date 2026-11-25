@@ -1,12 +1,10 @@
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { usePolling } from "../hooks";
 import type { Batch, LibraryDirectory } from "../types";
 import { ErrorBox, timeAgo } from "./common";
 import { JobsTable } from "./JobsTable";
-
-const FILES_PER_REQUEST = 20;
-const PARALLEL_REQUESTS = 3;
+import { uploadFolderFiles, type UploadProgress } from "../upload";
 
 export function ImportPanel({ onOpenSeries }: { onOpenSeries: (id: number) => void }) {
   const [refreshKey, setRefreshKey] = useState(0);
@@ -18,22 +16,34 @@ export function ImportPanel({ onOpenSeries }: { onOpenSeries: (id: number) => vo
   const [dirs, setDirs] = useState<LibraryDirectory[]>([]);
   const [manualPath, setManualPath] = useState("");
   const [batches, setBatches] = useState<Batch[]>([]);
+  const [batchCursors, setBatchCursors] = useState<number[]>([]);
   const [csv, setCsv] = useState<File | null>(null);
-  const [upload, setUpload] = useState<{ done: number; total: number } | null>(null);
+  const [upload, setUpload] = useState<UploadProgress>(null);
+  const uploadController = useRef<AbortController | null>(null);
+  useEffect(() => () => uploadController.current?.abort(), []);
+
+  usePolling(async (signal) => {
+    try {
+      const directories = await api.libraryDirectories(signal);
+      if (!signal.aborted) setDirs(directories);
+    } catch (e) {
+      if (!signal.aborted) setError((e as Error).message);
+    }
+  }, null, [refreshKey]);
 
   const batchesActive = batches.some((b) => !b.done);
   usePolling(
-    async () => {
+    async (signal) => {
       try {
-        const [d, b] = await Promise.all([api.libraryDirectories(), api.listBatches()]);
-        setDirs(d);
+        const b = await api.listBatches(batchCursors.at(-1), signal);
+        if (signal.aborted) return;
         setBatches(b);
       } catch (e) {
-        setError((e as Error).message);
+        if (!signal.aborted) setError((e as Error).message);
       }
     },
     batchesActive ? 2000 : 15000,
-    [refreshKey],
+    [refreshKey, batchCursors],
   );
 
   async function run(action: () => Promise<string>) {
@@ -64,6 +74,7 @@ export function ImportPanel({ onOpenSeries }: { onOpenSeries: (id: number) => vo
     void run(async () => {
       const batch = await api.submitBatch(csv);
       setBatchFilter(batch.id);
+      setBatchCursors([]);
       return `Batch #${batch.id}: ${batch.queued} row(s) queued, ${batch.rejected} rejected (see the jobs below)`;
     });
   }
@@ -72,27 +83,14 @@ export function ImportPanel({ onOpenSeries }: { onOpenSeries: (id: number) => vo
     const files = Array.from(fileList ?? []).filter((f) => !f.name.startsWith("."));
     if (files.length === 0) return;
     void run(async () => {
-      setUpload({ done: 0, total: files.length });
-      const { upload_id } = await api.startUpload();
-      const chunks: File[][] = [];
-      for (let i = 0; i < files.length; i += FILES_PER_REQUEST) chunks.push(files.slice(i, i + FILES_PER_REQUEST));
-      let next = 0;
-      let done = 0;
-      const sender = async () => {
-        while (next < chunks.length) {
-          const chunk = chunks[next++];
-          await api.uploadFiles(upload_id, chunk);
-          done += chunk.length;
-          setUpload({ done, total: files.length });
-        }
-      };
+      const controller = new AbortController();
+      uploadController.current = controller;
       try {
-        await Promise.all(Array.from({ length: PARALLEL_REQUESTS }, sender));
+        const job = await uploadFolderFiles(files, setUpload, controller);
+        return `Uploaded ${files.length} files; job #${job.id} queued`;
       } finally {
-        setUpload(null);
+        uploadController.current = null;
       }
-      const job = await api.completeUpload(upload_id);
-      return `Uploaded ${files.length} files; job #${job.id} queued`;
     });
   }
 
@@ -104,6 +102,7 @@ export function ImportPanel({ onOpenSeries }: { onOpenSeries: (id: number) => vo
       <div className="import-grid">
         <div className="card">
           <h3>Index a directory on the server</h3>
+          <button className="small" onClick={refresh}>Refresh directories</button>
           <p className="muted">Directories under the mounted DICOM library (the <code>data/</code> folder).</p>
           <table className="grid compact">
             <tbody>
@@ -196,10 +195,16 @@ export function ImportPanel({ onOpenSeries }: { onOpenSeries: (id: number) => vo
               </tbody>
             </table>
           )}
+          {(batchCursors.length > 0 || batches.length > 8) && <div className="row">
+            <button disabled={batchCursors.length === 0} onClick={() => setBatchCursors(batchCursors.slice(0, -1))}>Previous batches</button>
+            <span>Page {batchCursors.length + 1}</span>
+            <button disabled={batches.length <= 8} onClick={() => setBatchCursors([...batchCursors, batches[7].id])}>Next batches</button>
+          </div>}
         </div>
       </div>
 
       <JobsTable
+        key={batchFilter ?? "all"}
         refreshKey={refreshKey}
         batchId={batchFilter}
         onClearBatch={() => setBatchFilter(null)}

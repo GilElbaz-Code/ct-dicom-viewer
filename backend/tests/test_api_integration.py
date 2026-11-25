@@ -13,27 +13,14 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from fastapi.testclient import TestClient
 from PIL import Image
 
 from app import repository
-from app.config import Settings, get_settings
 from app.errors import JobError
 from app.jobs import queue
 from app.jobs.handlers import HANDLERS
-from app.main import create_app
 from app.tools.synthetic import write_series
 from app.worker import Worker
-
-
-@pytest.fixture
-def env(database_url: str, data_roots: Settings, small_series: Path):
-    shutil.copytree(small_series, data_roots.library_root / "series_a")
-    settings = get_settings()
-    worker = Worker(settings)
-    with TestClient(create_app()) as client:
-        yield client, worker, settings
-    worker.pool.close()
 
 
 def drain(worker: Worker, limit: int = 50) -> int:
@@ -64,6 +51,7 @@ def test_interactive_ingest_then_view(env) -> None:
     assert series["num_slices"] == 40 and series["rows"] == 64
     assert series["slice_thickness"] == 1.0 and series["computed_slice_spacing"] == pytest.approx(2.5)
     assert series["analysis"]["qc"]["slice_gaps"] == 0
+    assert "worker_id" not in job and "sagittal_path" not in series["analysis"]  # internals stay server-side
 
     loc = client.get(f"/api/series/{series_id}/locate", params={"z": 0.4}).json()
     assert loc["z"] == pytest.approx(1.25) and loc["distance_mm"] == pytest.approx(0.85)
@@ -241,13 +229,22 @@ def test_library_listing_health_and_stats(env) -> None:
     assert stats["jobs_by_status"] == {"succeeded": 2} and stats["series_by_status"] == {"ready": 1}
 
 
+def test_ready_reports_database_outage_as_503(env) -> None:
+    client, _, _ = env
+    client.app.state.pool.close()
+    response = client.get("/api/ready")
+    assert response.status_code == 503 and response.json()["checks"]["database"].startswith("error")
+
+
 def test_analysis_output_is_stored_under_the_numeric_series_id(env) -> None:
     client, worker, settings = env
     client.post("/api/jobs", json={"path": "series_a"})
     drain(worker)
     series = client.get("/api/series").json()["items"][0]
-    path = Path(client.get(f"/api/series/{series['id']}").json()["analysis"]["sagittal_path"])
-    assert path == settings.derived_root / str(series["id"]) / "sagittal.npy"
+    with worker.pool.connection() as conn:  # the path is internal, so read it from the database, not the API
+        path = Path(repository.get_series(conn, series["id"])["analysis"]["sagittal_path"])
+    assert path.parent == settings.derived_root / str(series["id"])
+    assert path.name.startswith("sagittal-") and path.suffix == ".npy"
     assert not list(path.parent.glob("*.tmp.npy"))  # temp files are renamed away
 
 

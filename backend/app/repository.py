@@ -159,14 +159,6 @@ def slice_positions(conn: Connection, series_id: int) -> list[dict]:
     ).fetchall()
 
 
-def get_instance(conn: Connection, series_id: int, slice_index: int) -> dict | None:
-    return conn.execute(
-        "SELECT slice_index, z_position, instance_number, file_path FROM instances "
-        "WHERE series_id = %s AND slice_index = %s",
-        (series_id, slice_index),
-    ).fetchone()
-
-
 def list_instances(conn: Connection, series_id: int) -> list[dict]:
     return conn.execute(
         "SELECT slice_index, z_position, file_path FROM instances WHERE series_id = %s ORDER BY slice_index",

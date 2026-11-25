@@ -60,6 +60,7 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npm run build  # type-check + production bundle
+      - run: npm test       # component races, polling, uploads and slice lookup
 
   # The whole stack as a user would run it: compose up, demo data, end-to-end smoke test.
   e2e:

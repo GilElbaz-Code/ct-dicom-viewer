@@ -16,23 +16,28 @@ export function JobsTable({ refreshKey, batchId, onClearBatch, onOpenSeries }: P
   const [jobs, setJobs] = useState<Job[]>([]);
   const [status, setStatus] = useState<JobStatus | "">("");
   const [error, setError] = useState<string | null>(null);
+  // before_id of each page after the first; keyset pages stay put while new jobs arrive
+  const [cursors, setCursors] = useState<number[]>([]);
+  const [reload, setReload] = useState(0);
   const active = jobs.some((j) => j.status === "queued" || j.status === "running");
 
-  async function load() {
+  async function load(signal: AbortSignal) {
     try {
-      setJobs(await api.listJobs({ status: status || undefined, batch_id: batchId ?? undefined, limit: 200 }));
+      const result = await api.listJobs({ status: status || undefined, batch_id: batchId ?? undefined, limit: 51, before_id: cursors.at(-1) }, signal);
+      if (signal.aborted) return;
+      setJobs(result);
       setError(null);
     } catch (e) {
-      setError((e as Error).message);
+      if (!signal.aborted) setError((e as Error).message);
     }
   }
 
-  usePolling(load, active ? 2000 : 10000, [refreshKey, status, batchId]);
+  usePolling(load, active ? 2000 : 10000, [refreshKey, status, batchId, cursors, reload]);
 
   async function retry(id: number) {
     try {
       await api.retryJob(id);
-      await load();
+      setReload((value) => value + 1);
     } catch (e) {
       setError((e as Error).message);
     }
@@ -44,7 +49,7 @@ export function JobsTable({ refreshKey, batchId, onClearBatch, onOpenSeries }: P
         <h3>Jobs {batchId !== null && <span className="chip">batch #{batchId} <button className="link" onClick={onClearBatch}>×</button></span>}</h3>
         <label className="field inline">
           <span>Status</span>
-          <select value={status} onChange={(e) => setStatus(e.target.value as JobStatus | "")}>
+          <select value={status} onChange={(e) => { setStatus(e.target.value as JobStatus | ""); setCursors([]); }}>
             <option value="">all</option>
             <option value="queued">queued</option>
             <option value="running">running</option>
@@ -78,7 +83,7 @@ export function JobsTable({ refreshKey, batchId, onClearBatch, onOpenSeries }: P
               </td>
             </tr>
           )}
-          {jobs.map((j) => (
+          {jobs.slice(0, 50).map((j) => (
             <tr key={j.id} className={j.status === "failed" ? "row-failed" : ""}>
               <td>{j.id}</td>
               <td>{j.kind}</td>
@@ -125,6 +130,11 @@ export function JobsTable({ refreshKey, batchId, onClearBatch, onOpenSeries }: P
           ))}
         </tbody>
       </table>
+      <div className="row">
+        <button disabled={cursors.length === 0} onClick={() => setCursors(cursors.slice(0, -1))}>Previous jobs</button>
+        <span>Page {cursors.length + 1}</span>
+        <button disabled={jobs.length <= 50} onClick={() => setCursors([...cursors, jobs[49].id])}>Next jobs</button>
+      </div>
     </div>
   );
 }

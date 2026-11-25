@@ -10,3 +10,6 @@ __pycache__/
 node_modules/
 dist/
 *.tsbuildinfo
+.idea
+# assignment brief; not part of the repository
+Backend_Engineer_Home_Assignment.pdf

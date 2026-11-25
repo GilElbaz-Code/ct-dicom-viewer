@@ -82,7 +82,9 @@ Some behaviour worth knowing:
   file name or instance number.
 * A location outside the scanned range shows the nearest slice and says it is outside.
 * *Spacing between slices* shows the DICOM tag when present; otherwise the median distance between slice
-  positions, marked *computed* (many CT series do not write the tag).
+  positions, marked *computed* (many CT series do not write the tag). When the tag disagrees with the positions
+  (the sample PET/CT series says 3.27 mm, its slices are 2.5 mm apart) both are shown; geometry always uses
+  the positions.
 * Directories with several series, no DICOM images, duplicate slice positions or non-axial images fail with a
   specific reason. Gaps between slices produce a warning and are interpolated in the sagittal view.
 
@@ -100,6 +102,9 @@ path
 [`examples/batch_with_errors.csv`](examples/batch_with_errors.csv) shows how bad rows are reported.
 
 ## Why PostgreSQL
+
+Schema: [`backend/migrations/`](backend/migrations/) (`001_initial.sql`, `002_upload_sessions.sql`), applied in
+order by the `migrate` service (`python -m app.migrate`) before the API and worker start.
 
 The metadata is written by several processes at once (the API and every worker) and queried by researchers at
 the same time. PostgreSQL handles concurrent writers natively, while SQLite serializes all writes and DuckDB
@@ -139,11 +144,11 @@ Interactive documentation: **http://localhost:8080/api/docs**.
 |---|---|
 | `POST /api/jobs` `{"path": "…"}` | Index one directory (interactive) |
 | `POST /api/batches` (CSV upload) | One ingest job per CSV row |
-| `POST /api/uploads` → `…/files` → `…/complete` | Upload a folder from the browser, then index it |
-| `GET /api/jobs`, `GET /api/jobs/{id}`, `POST /api/jobs/{id}/retry` | Job status, reasons, retry |
-| `GET /api/batches`, `GET /api/batches/{id}` | Per-batch ready / failed / pending rows |
+| `POST /api/uploads` → `…/files` → `…/complete` | Upload a folder from the browser, then index it (parts and completion are safe to retry) |
+| `GET /api/jobs?status=&batch_id=&limit=&before_id=`, `GET /api/jobs/{id}`, `POST /api/jobs/{id}/retry` | Job status, reasons, retry |
+| `GET /api/batches?limit=&before_id=`, `GET /api/batches/{id}` | Per-batch ready / failed / pending rows |
 | `GET /api/series?max_slice_thickness=1.5&study_description=…&q=…` | Cross-study metadata queries |
-| `GET /api/series/{id}` | Metadata, analysis status and QC |
+| `GET /api/series/{id}` | Metadata, analysis status, QC and every slice's z position (the viewer finds slices locally) |
 | `GET /api/series/{id}/locate?z=…` or `?index=…` | Closest slice to a location |
 | `GET /api/series/{id}/axial/{index}?window=400&level=40` | Axial slice as PNG |
 | `GET /api/series/{id}/sagittal?window=400&level=40` | Mid-volume sagittal as PNG |
@@ -162,11 +167,16 @@ TEST_DATABASE_URL=postgresql://user:pass@localhost:5432/postgres pytest  # + int
 ruff check . && ruff format --check .
 ```
 
-Frontend with hot reload, against an API on port 8000:
+Frontend tests (Vitest, mocked API) and hot reload against an API on port 8000:
 
 ```bash
-cd frontend && npm ci && npm run dev      # http://localhost:5173, proxies /api to localhost:8000
+cd frontend && npm ci && npm test && npm run build
+npm run dev                               # http://localhost:5173, proxies /api to localhost:8000
 ```
+
+What the suites cover (23 frontend, 53 backend unit, 29 PostgreSQL integration tests) and what they do not
+(real browser, production throughput, network storage) is listed in
+[`docs/devops.md`](docs/devops.md#what-the-tests-cover-and-what-they-do-not).
 
 Run the API and a worker outside Docker with `uvicorn app.main:app --reload` and `python -m app.worker`,
 setting `DATABASE_URL`, `LIBRARY_ROOT`, `UPLOAD_ROOT` and `DERIVED_ROOT`.
@@ -181,6 +191,7 @@ setting `DATABASE_URL`, `LIBRARY_ROOT`, `UPLOAD_ROOT` and `DERIVED_ROOT`.
 | `POSTGRES_PASSWORD` | `ctviewer-dev-only` | Database password (set it in `.env` before the first start; it is applied only when the database volume is created) |
 | `WORKER_REPLICAS` | `2` | Number of worker containers |
 | `JOB_MAX_ATTEMPTS` | `3` | Attempts for retryable errors |
+| `MAX_UPLOAD_FILE_MB` / `MAX_UPLOAD_TOTAL_MB` | `50` / `2048` | Largest uploaded file / whole browser upload |
 | `JOB_LEASE_SECONDS` | `120` | Lease before a silent worker's job is reclaimed |
 | `WORKER_KINDS` | `ingest,analyze` | Job kinds a worker takes (separate pools per kind) |
 
@@ -195,9 +206,10 @@ backend/
     worker.py       job worker
     migrate.py      SQL migration runner
     tools/synthetic.py  synthetic CT series generator
-  migrations/       schema (001_initial.sql)
+  migrations/       schema (001_initial.sql, 002_upload_sessions.sql)
   tests/            unit + integration tests
-frontend/src/       React app (Viewer, Series, Import & jobs)
+frontend/src/       React app (Viewer, Series, Import & jobs); location.ts, upload.ts
+frontend/tests/     Vitest unit and component tests
 docs/               design.md, devops.md
 scripts/smoke_test.sh
 .github/workflows/ci.yml

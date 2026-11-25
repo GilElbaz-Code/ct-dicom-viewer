@@ -9,7 +9,12 @@ export class ApiError extends Error {
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`/api${path}`, init);
   const text = await response.text();
-  const body = text ? JSON.parse(text) : null;
+  let body;
+  try {
+    body = text ? JSON.parse(text) : null;
+  } catch {
+    throw new ApiError(response.status, response.ok ? "Invalid response from the server" : response.statusText);
+  }
   if (!response.ok) {
     // FastAPI returns {detail: string} or {detail: [{msg, loc}]} for validation errors
     const detail = body?.detail;
@@ -35,9 +40,9 @@ function query(params: Record<string, string | number | boolean | undefined | nu
 }
 
 export const api = {
-  searchSeries: (params: Record<string, string | number | undefined>) =>
-    request<{ items: Series[]; total: number }>(`/series${query({ limit: 500, ...params })}`),
-  getSeries: (id: number) => request<SeriesDetail>(`/series/${id}`),
+  searchSeries: (params: Record<string, string | number | undefined>, signal?: AbortSignal) =>
+    request<{ items: Series[]; total: number }>(`/series${query({ limit: 50, ...params })}`, { signal }),
+  getSeries: (id: number, signal?: AbortSignal) => request<SeriesDetail>(`/series/${id}`, { signal }),
   locate: (id: number, by: { z: number } | { index: number }) => request<Located>(`/series/${id}/locate${query(by)}`),
   // `version` changes when a series is re-indexed, so the browser never shows a cached slice of the old files
   axialUrl: (id: number, index: number, window: number, level: number, version: string) =>
@@ -45,7 +50,7 @@ export const api = {
   sagittalUrl: (id: number, window: number, level: number, version: string) =>
     `/api/series/${id}/sagittal${query({ window, level, v: version })}`,
 
-  listJobs: (params: Record<string, string | number | undefined>) => request<Job[]>(`/jobs${query(params)}`),
+  listJobs: (params: Record<string, string | number | undefined>, signal?: AbortSignal) => request<Job[]>(`/jobs${query(params)}`, { signal }),
   submitPath: (path: string) => request<Job>("/jobs", json({ path })),
   retryJob: (id: number) => request<Job>(`/jobs/${id}/retry`, { method: "POST" }),
 
@@ -54,15 +59,16 @@ export const api = {
     form.append("file", file);
     return request<Batch>("/batches", { method: "POST", body: form });
   },
-  listBatches: () => request<Batch[]>("/batches"),
+  listBatches: (beforeId: number | undefined, signal?: AbortSignal) =>
+    request<Batch[]>(`/batches${query({ before_id: beforeId, limit: 9 })}`, { signal }),
 
-  startUpload: () => request<{ upload_id: string }>("/uploads", { method: "POST" }),
-  uploadFiles: (uploadId: string, files: File[]) => {
+  startUpload: (signal?: AbortSignal) => request<{ upload_id: string }>("/uploads", { method: "POST", signal }),
+  uploadFiles: (uploadId: string, files: File[], signal?: AbortSignal) => {
     const form = new FormData();
-    for (const f of files) form.append("files", f, f.name);
-    return request<{ saved: number }>(`/uploads/${uploadId}/files`, { method: "POST", body: form });
+    for (const f of files) form.append("files", f, f.webkitRelativePath || f.name);
+    return request<{ saved: number }>(`/uploads/${uploadId}/files`, { method: "POST", body: form, signal });
   },
-  completeUpload: (uploadId: string) => request<Job>(`/uploads/${uploadId}/complete`, { method: "POST" }),
+  completeUpload: (uploadId: string, signal?: AbortSignal) => request<Job>(`/uploads/${uploadId}/complete`, { method: "POST", signal }),
 
-  libraryDirectories: () => request<LibraryDirectory[]>("/library/directories"),
+  libraryDirectories: (signal?: AbortSignal) => request<LibraryDirectory[]>("/library/directories", { signal }),
 };

@@ -122,6 +122,32 @@ def test_accepts_flipped_axial_planes(small_series: Path, tmp_path: Path) -> Non
     assert read_series_headers(target).num_slices == 40
 
 
+@pytest.mark.parametrize("spacing", [[0, 1], [-1, 1], [float("nan"), 1], [float("inf"), 1], [1]])
+def test_rejects_invalid_pixel_spacing(small_series: Path, tmp_path: Path, spacing) -> None:
+    target = shutil.copytree(small_series, tmp_path / "invalid_spacing")
+    _rewrite(target, lambda ds, i: setattr(ds, "PixelSpacing", spacing))
+    with pytest.raises(SeriesValidationError) as err:
+        read_series_headers(target)
+    assert err.value.code == "invalid_pixel_spacing"
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_rejects_inconsistent_pixel_spacing(small_series: Path, tmp_path: Path, missing) -> None:
+    target = shutil.copytree(small_series, tmp_path / "mixed_spacing")
+
+    def change(ds, i):
+        if i == 5:
+            if missing:
+                del ds.PixelSpacing
+            else:
+                ds.PixelSpacing = [1, 2]
+
+    _rewrite(target, change)
+    with pytest.raises(SeriesValidationError) as err:
+        read_series_headers(target)
+    assert err.value.code == "inconsistent_geometry"
+
+
 def test_rejects_drifting_slice_origins(small_series: Path, tmp_path: Path) -> None:
     target = shutil.copytree(small_series, tmp_path / "drift")
 

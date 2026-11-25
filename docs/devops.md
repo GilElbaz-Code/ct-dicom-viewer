@@ -30,7 +30,7 @@ Containers are disposable; nothing that matters is stored in a container's own f
 |---|---|---|---|
 | Source DICOM library | Host folder `./data` (or `DICOM_LIBRARY_DIR`); in production the research NAS | api, worker | **read-only** |
 | Browser uploads | Named volume `uploads` | api (rw), worker (ro) | only the API writes |
-| Derived results (sagittal planes, QC) | Named volume `derived` | worker (rw), api (ro) | only workers write |
+| Derived results (sagittal planes; QC numbers are in the database) | Named volume `derived` | worker (rw), api (ro) | only workers write |
 | PostgreSQL data | Named volume `pgdata` | db | only Postgres |
 
 The read-only mounts are a guarantee, not a convention: no bug in the app can modify source data. Each volume
@@ -62,13 +62,33 @@ bound to `127.0.0.1` by default because the demo has no login (`WEB_BIND=0.0.0.0
 1. **backend**: build the image's `test` stage (layer cache in GitHub Actions), run `ruff` and `pytest`
    inside it against a Postgres service container. The integration tests create a throw-away database per test,
    run the real migrations, and drive the API, the queue and the worker together.
-2. **frontend**: `npm ci` and `npm run build`, which type-checks with `tsc` and bundles.
+2. **frontend**: `npm ci`, `npm run build` (type-checks with `tsc` and bundles) and `npm test` (Vitest in
+   jsdom).
 3. **e2e** (after both pass): `docker compose up --build` on a clean runner, the same way a reviewer would,
    generate a synthetic series, and run [`scripts/smoke_test.sh`](../scripts/smoke_test.sh): index, wait
    for analysis, fetch axial and sagittal PNGs, submit a batch with a bad row, run a metadata query. On failure
    it prints the container logs.
 4. **publish** (`main` only): push `backend` and `web` images to GitHub Container Registry, tagged with the
    commit SHA (immutable, used for deploys and rollbacks) and `latest`.
+
+### What the tests cover, and what they do not
+
+| Suite | Count | Runs | Validates |
+|---|---|---|---|
+| Frontend unit and component tests | 23 | Vitest + jsdom, API mocked | Local slice lookup (closest z, ties, out of range, invalid input); polling never overlaps and aborts on change or unmount; upload retries with the same session, aborts the other parts on a permanent failure and clears progress; parts are capped by bytes and file count; a late response for an old series cannot replace the new one; jobs and series pages reach older rows |
+| Backend unit tests | 53 | pytest, no database | DICOM header validation (several series, duplicate or drifting positions, non-axial, invalid or inconsistent `PixelSpacing`), slice sorting, HU and window/level, sagittal geometry, path containment, CSV parsing, configuration |
+| Backend integration tests | 29 | pytest against real PostgreSQL, a fresh migrated database per test | Ingest → analyze chain through the API, queue and worker; `SKIP LOCKED` passing over a row another transaction holds; completion waiting for a part that holds its lock; retries with backoff; expired leases and stale workers (a stale analysis cannot replace published pixels); superseded derived files removed; upload idempotency (repeated parts, conflicting content, repeated or concurrent completion, empty upload), total size cap, abandoned-upload cleanup, adoption of pre-002 uploads; cross-study queries; offset and keyset pagination; image endpoints release their connection; readiness returns `503` when the database is down; internal columns never reach the API |
+
+Without `TEST_DATABASE_URL` the 29 integration tests are skipped, not failed. The two lock tests hold the lock
+in a second connection; each fails if its lock (`SKIP LOCKED`, or `FOR UPDATE` on completion) is removed.
+
+Not covered by automated tests:
+
+* **Real browser and Docker end to end.** Component tests run in jsdom with a mocked API. The CI `e2e` job is
+  a curl-level smoke test of the compose stack, not a browser test.
+* **Production throughput.** Nothing measures jobs per minute, API latency under load, or pool exhaustion.
+* **Real NAS or network storage.** Tests use the local disk; NFS latency, hard-link support and partial
+  outages are not exercised.
 
 Deploying would be one more job: on a tag, update the image tags in the target environment and run
 `migrate` before the new API and worker replicas start. Rollback = redeploy the previous SHA; migrations are

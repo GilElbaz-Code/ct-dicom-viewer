@@ -15,37 +15,40 @@ const EMPTY: Filters = { q: "", study_description: "", max_slice_thickness: "", 
 /** Cross-study search over the metadata index. */
 export function SeriesBrowser({ onOpen }: { onOpen: (id: number) => void }) {
   const [filters, setFilters] = useState<Filters>(EMPTY);
+  const [query, setQuery] = useState({ filters: EMPTY, offset: 0 });
   const [items, setItems] = useState<Series[]>([]);
   const [total, setTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
-  async function search(f: Filters) {
+  useEffect(() => {
+    const controller = new AbortController();
+    async function search() {
     try {
-      const r = await api.searchSeries({ ...f });
+      const r = await api.searchSeries({ ...query.filters, offset: query.offset }, controller.signal);
+      if (controller.signal.aborted) return;
       setItems(r.items);
       setTotal(r.total);
       setError(null);
     } catch (e) {
-      setError((e as Error).message);
+      if (!controller.signal.aborted) setError((e as Error).message);
     }
-  }
-
-  useEffect(() => {
-    void search(EMPTY);
-  }, []);
+    }
+    void search();
+    return () => controller.abort();
+  }, [query]);
 
   const set = (key: keyof Filters) => (e: { target: { value: string } }) =>
     setFilters({ ...filters, [key]: e.target.value });
 
   function submit(event: FormEvent) {
     event.preventDefault();
-    void search(filters);
+    setQuery({ filters, offset: 0 });
   }
 
   function example(f: Partial<Filters>) {
     const next = { ...EMPTY, ...f };
     setFilters(next);
-    void search(next);
+    setQuery({ filters: next, offset: 0 });
   }
 
   return (
@@ -123,6 +126,11 @@ export function SeriesBrowser({ onOpen }: { onOpen: (id: number) => void }) {
             ))}
           </tbody>
         </table>
+        <div className="row">
+          <button disabled={query.offset === 0} onClick={() => setQuery({ ...query, offset: Math.max(0, query.offset - 50) })}>Previous series</button>
+          <span>Page {query.offset / 50 + 1} · {total} series</span>
+          <button disabled={query.offset + 50 >= total} onClick={() => setQuery({ ...query, offset: query.offset + 50 })}>Next series</button>
+        </div>
       </div>
     </section>
   );

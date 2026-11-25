@@ -183,10 +183,14 @@ def list_jobs(
     batch_id: int | None = None,
     series_id: int | None = None,
     submitted_by: str | None = None,
+    before_id: int | None = None,
     limit: int = 100,
     offset: int = 0,
 ) -> list[dict]:
     clauses, params = [], []
+    if before_id is not None:  # keyset page: stable while new jobs arrive, unlike OFFSET
+        clauses.append("id < %s")
+        params.append(before_id)
     for column, value in (
         ("status", status),
         ("kind", kind),

@@ -22,6 +22,7 @@ class Settings:
     worker_kinds: tuple[str, ...]
     worker_heartbeat_file: Path
     max_upload_file_mb: int
+    max_upload_total_mb: int
     max_batch_rows: int
     log_level: str
 
@@ -60,6 +61,7 @@ def get_settings() -> Settings:
         worker_kinds=tuple(k.strip() for k in env("WORKER_KINDS", "ingest,analyze").split(",") if k.strip()),
         worker_heartbeat_file=Path(env("WORKER_HEARTBEAT_FILE", "/tmp/worker-heartbeat")),
         max_upload_file_mb=int(env("MAX_UPLOAD_FILE_MB", "50")),
+        max_upload_total_mb=int(env("MAX_UPLOAD_TOTAL_MB", "2048")),
         max_batch_rows=int(env("MAX_BATCH_ROWS", "5000")),
         log_level=env("LOG_LEVEL", "INFO"),
     )

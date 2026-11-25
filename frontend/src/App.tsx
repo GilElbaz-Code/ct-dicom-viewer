@@ -35,10 +35,23 @@ export function App() {
   return (
     <div className="app">
       <header>
-        <h1>CT DICOM Viewer</h1>
+        <div className="brand">
+          {/* gantry ring with an axial plane through it */}
+          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+            <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeWidth="2" />
+            <circle cx="12" cy="12" r="4.5" fill="none" stroke="currentColor" strokeWidth="1.5" opacity="0.55" />
+            <line x1="1.5" y1="12" x2="22.5" y2="12" stroke="var(--line)" strokeWidth="1.5" />
+          </svg>
+          <h1>CT DICOM Viewer</h1>
+        </div>
         <nav>
           {TABS.map(([t, label]) => (
-            <button key={t} className={t === tab ? "tab on" : "tab"} onClick={() => go(t)}>
+            <button
+              key={t}
+              className={t === tab ? "tab on" : "tab"}
+              aria-current={t === tab ? "page" : undefined}
+              onClick={() => go(t)}
+            >
               {label}
             </button>
           ))}

@@ -123,6 +123,10 @@ class Worker:
                 if not queue.mark_succeeded(conn, job, self.worker_id, result):
                     raise LeaseLostError()
             log.info("job %s succeeded", job["id"])
+            try:
+                handler.after_commit(payload, self.ctx)
+            except Exception:  # the job already succeeded; leftover files only cost disk space
+                log.exception("job %s: cleanup after success failed", job["id"])
             return
         except LeaseLostError:
             log.warning("job %s: lease lost; another worker owns it now, result discarded", job["id"])

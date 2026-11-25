@@ -18,6 +18,9 @@ this repository implements a working slice of it (see [What the slice implements
 4. **Identity.** The institute has single sign-on (OIDC/SAML). The app's nginx checks each request against an
    OIDC proxy (`auth_request`) and passes the verified user to the API in a header it always overwrites.
    All researchers in the group may see all indexed series.
+   **Ownership** is recorded, not enforced: jobs and batches store `submitted_by` for audit and "my jobs",
+   but any researcher may view or retry any job. An upload session has no owner; its random UUID is the only
+   key to it. Per-user permissions would be one `owner` column checked in the API.
 5. **Analysis.** "Processing" is a pluggable step (today: viewer artifacts and QC; tomorrow: segmentation or a
    model on a GPU). It can take minutes, can fail, and must not block metadata from being searchable.
 6. **Deployment.** On-premises containers (Docker Compose for one host, Kubernetes for several), because the
@@ -98,9 +101,30 @@ whose path is invalid (missing, outside the allowed roots) is stored immediately
 reason, so the user sees every row's outcome in one table instead of the whole file being rejected. The batch
 summary (`ready / failed / pending` per row) is computed from the jobs and the resulting series.
 
-**Upload.** The browser opens an upload session, sends the files in small multipart requests (20 files each,
-3 in parallel, so no request is near 1 GB and a failed part is cheap to resend), then calls `complete`, which
-creates the same ingest job pointing at the upload directory.
+**Upload.** The browser opens an upload session (`POST /api/uploads` creates a directory and an
+`upload_sessions` row), sends the files in small multipart requests (at most 20 files and 100 MB each,
+3 in parallel, so no request reaches the proxy's 200 MB limit and a failed part is cheap to resend), then calls `complete`, which creates the same
+ingest job pointing at the upload directory. Every step is safe to repeat:
+
+* **Parts.** Each file is stored under the SHA-256 of its client-side relative path (`one/slice.dcm` and
+  `two/slice.dcm` stay distinct; no client path ever becomes a server path). It is written to a temp file and
+  published with a hard link, which never replaces an existing file. Re-sending a part with the same bytes is a
+  no-op; the same name with different bytes is a `409`.
+* **Locking.** A part request holds `FOR SHARE` on the session row, so parts run in parallel; `complete` takes
+  `FOR UPDATE`, so it waits for every in-flight part to finish before it looks at the directory.
+* **Completion.** The ingest job and `upload_sessions.job_id` commit in one transaction. A repeated or
+  concurrent `complete` returns the same job; a part sent after completion gets `409`; completing an empty
+  upload gets `400`.
+* **Client retries.** The browser retries a part or `complete` up to twice (300 ms, 600 ms) on network errors,
+  5xx, 408 and 429, always with the same session, and never on other 4xx. If any part fails for good, it aborts
+  the other in-flight parts and does not call `complete`.
+* **Size.** One file may be 50 MB, a whole upload 2 GB (`MAX_UPLOAD_TOTAL_MB`); beyond that the part gets
+  `413`. Re-sent files do not count twice.
+* **Abandoned uploads.** Opening a new upload deletes sessions that were never completed within 24 hours,
+  with their files. Completed uploads are the source data of indexed series and are never deleted.
+* **Upgrades.** An upload directory without a session row (started before migration 002) is adopted on its
+  next request, as completed if an ingest job already points at it, so an upgrade does not break uploads in
+  flight.
 
 ## Jobs
 
@@ -122,10 +146,16 @@ stateDiagram-v2
   If a worker is killed, the lease expires and another worker reclaims the job. A job that keeps killing its
   worker (for example out of memory) fails with `worker_lost` after `max_attempts`.
 * **Exactly one result.** Results and the `succeeded` status are written in **one transaction**, and the
-  update only applies if this worker still owns the job. A worker that lost its lease cannot overwrite the
-  result of the worker that took over.
+  update only applies if this worker still owns the job (`worker_id` matches and the job is still `running`);
+  otherwise the whole transaction rolls back. Derived files get a fresh name per execution
+  (`sagittal-<uuid>.npy`), so a worker that lost its lease may still finish writing *its* file but can never
+  replace the pixels the database points to. Only after its own commit does the owning worker delete the
+  files in that folder that are *older* than the one it published (superseded results, stale workers' output,
+  crashed temp files); a newer file may belong to a later analysis and is left alone. Analysis also re-checks `series.updated_at` under a row lock: if
+  the series was re-indexed during the pixel pass, the result is discarded and the job retried.
 * **Idempotent.** Series are keyed on `SeriesInstanceUID`; re-ingesting a directory refreshes the same rows.
-  A partial unique index allows at most one active analysis per series.
+  A partial unique index allows at most one active analysis per series. Upload parts and completion are
+  idempotent too (see *Upload* above).
 * **Retry policy.** Errors carry a code and a `retryable` flag. Data problems (`multiple_series`,
   `no_dicom_images`, `duplicate_positions`, `not_axial`, `pixel_decode_failed`…) fail at once, because retrying
   cannot fix the files. Infrastructure problems (`io_error` on network storage, database errors) are retried
@@ -174,9 +204,15 @@ SELECT … WHERE lower(st.study_description) = lower('CT CHEST W CONTRAST');
 
 ## Viewer: how a request is served
 
-* **Axial slice.** `locate?z=…` finds the closest slice by binary search over the sorted z positions
-  (`ImagePositionPatient[2]`); `axial/{index}` reads that one file, converts to Hounsfield units with
-  `RescaleSlope/Intercept`, applies window/level and returns a PNG. About 20 ms; no volume is loaded.
+* **Finding the slice.** `GET /series/{id}` returns the metadata and every slice's z position
+  (`ImagePositionPatient[2]`) and instance number, read in one `REPEATABLE READ` snapshot so the list always
+  matches the metadata, even during a re-index. The browser then resolves "z = 98.7 mm" or "index 120" itself
+  by binary search: same rule as the server, ties go to the lower slice, gaps respected. Moving the slider
+  costs no lookup request; only the axial PNG is fetched. `GET /series/{id}/locate` gives the same answer for API clients.
+* **Axial slice.** `axial/{index}` reads that one file, converts to Hounsfield units with
+  `RescaleSlope/Intercept`, applies window/level and returns a PNG. About 20 ms; no volume is loaded. The image
+  endpoints look up the file path, then return their database connection *before* decoding and encoding, so
+  slow PNG work never holds a pool connection.
 * **Sagittal.** Precomputed by the analysis job: the middle column of every slice, resampled along z to the
   in-plane pixel size so anatomy keeps its true proportions (2.5 mm slices with 0.7 mm pixels would otherwise
   be squashed 3.5×), with gaps interpolated by position rather than by slice count. The API only windows and
@@ -187,12 +223,13 @@ SELECT … WHERE lower(st.study_description) = lower('CT CHEST W CONTRAST');
 
 ```
 /data/library/…            shared research storage, read-only (CSV paths point here)
-/data/uploads/<uuid>/      browser uploads, one directory per upload session
-/data/derived/<SeriesUID>/ sagittal.npy (int16 HU), qc.json     ← written by analysis workers
+/data/uploads/<uuid>/      browser uploads, one directory per upload session; files named <sha256>.dcm
+/data/derived/<series id>/ sagittal-<uuid>.npy (int16 HU)        ← written by analysis workers
 ```
 
-Derived files are written to a temporary name and renamed, so a reader never sees half a file. The database
-row pointing to them is committed after the file exists.
+The folder is the numeric database id, so header values (UIDs) never become path components. Derived files
+are written to a temporary name and renamed, so a reader never sees half a file. The database row pointing to
+them is committed after the file exists. QC numbers live only in `analysis_results.qc`.
 
 ## Scaling and performance
 
@@ -207,6 +244,31 @@ axial PNG ~20 ms, sagittal PNG ~15 ms. On network storage both jobs are I/O boun
 * **Queue limits.** Postgres as a queue is comfortable up to thousands of jobs per minute. Beyond that, or for
   fan-out to many consumers, move to a broker (RabbitMQ, or SQS in the cloud) and keep Postgres as the record
   of job state.
+
+### Resource limits in the slice
+
+| Limit | Value | Where |
+|---|---|---|
+| Size of one uploaded file | 50 MB (`MAX_UPLOAD_FILE_MB`) → `413` | API |
+| One HTTP request body | 200 MB | nginx `client_max_body_size` |
+| Whole upload | 2 GB (`MAX_UPLOAD_TOTAL_MB`) → `413` | API |
+| Upload part | 20 files and 100 MB, 3 parts in parallel per browser | `frontend/src/upload.ts` |
+| Unfinished upload | deleted after 24 h | API, when the next upload starts |
+| CSV batch | 5,000 rows (`MAX_BATCH_ROWS`) | API |
+| API database pool | 10 connections per API process | `app/main.py` |
+| Worker database pool | 3 connections (claim, lease keeper, result) | `app/worker.py` |
+| Lease | 120 s (`JOB_LEASE_SECONDS`), extended every 15 s | worker |
+| Attempts and backoff | 3 (`JOB_MAX_ATTEMPTS`); 10 s, 20 s, 40 s … capped at 300 s | queue |
+| Page sizes | jobs and series 50 per page, batches 8; API maximum 500 (jobs, series), 200 (batches) | UI / API |
+| Proxy read timeout | 120 s | nginx |
+
+Each in-flight upload part holds one API pool connection while its files are copied to disk, because the
+`FOR SHARE` lock has to last that long. Three parallel parts per uploading browser therefore compete with
+viewers for the 10 connections. That is fine for tens of researchers; with many simultaneous uploads, raise the
+pool size or move uploads to presigned object-storage URLs (see *Cloud variant*). The total-size check reads
+the files already stored, so parts running in parallel can overshoot the cap by at most their own size
+(3 × 100 MB); an exact cap would need a byte counter updated under the session lock. There is no per-user
+quota.
 
 ## Security and privacy
 
@@ -239,7 +301,9 @@ axial PNG ~20 ms, sagittal PNG ~15 ms. On network storage both jobs are I/O boun
 | Viewer rendering | Server-side window/level to 8-bit PNG | Send raw 16-bit HU to the browser, window in WebGL | Simple and small (~50 KB per slice), works in any browser. Cost: one request per W/L change (debounced). For heavy interactive use, a client-side volume renderer (e.g. Cornerstone3D) is the next step. |
 | Sagittal | Precomputed once per series | Computed per request from the volume | A per-request sagittal must read all 800 files (~1 GB). Cost: only the mid-volume plane is available; arbitrary planes would need a stored volume (e.g. a chunked Zarr array). |
 | Metadata DB | PostgreSQL | SQLite, DuckDB | Concurrent writers (API + N workers), queue features, JSONB, trigram search, production operations. DuckDB is excellent for analytics exports but is not a concurrent OLTP store. |
-| Progress updates | Polling (2 s while jobs are active) | WebSockets / server-sent events | Survives proxies, reconnects and closed tabs with no extra state. Cost: a request every 2 s per open tab. |
+| Progress updates | Polling: jobs and batches every 2 s while any are active, then 10 s (jobs) / 15 s (batches); a series every 2 s while its analysis is pending, then stop | WebSockets / server-sent events | Survives proxies, reconnects and closed tabs with no extra state. The next poll is scheduled only after the previous one finishes (polls never overlap), and an in-flight poll is aborted when its filter, page or series changes, or on unmount, so a late answer never overwrites a newer one. Cost: a request every 2–15 s per open tab. |
+| Derived file names | New name per analysis execution, older files removed after commit | Overwrite one `sagittal.npy` | A stale worker can never replace published pixels. Cost: a stale worker's late file stays until the next analysis of that series. |
+| List pagination | Keyset (`before_id`) for jobs and batches, which change constantly; `limit`/`offset` for series | Offset everywhere | Job and batch pages do not shift while new jobs arrive. Series are ordered by study date, not id, and change rarely, so offset is fine there; keyset on `(study_date, id)` is the step at a million series. |
 
 ## Cloud variant
 

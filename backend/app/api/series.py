@@ -7,10 +7,11 @@ from pathlib import Path
 from typing import Annotated
 
 import numpy as np
-from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 
 from app import repository
 from app.api.deps import Conn
+from app.api.schemas import Located, SeriesDetail, SeriesPage, SeriesStatus
 from app.dicom.imaging import apply_window, closest_index, encode_png, load_slice_hu
 
 router = APIRouter(prefix="/series", tags=["series"])
@@ -27,7 +28,7 @@ def _series_or_404(conn: Conn, series_id: int) -> dict:
     return series
 
 
-@router.get("")
+@router.get("", response_model=SeriesPage)
 def search_series(
     conn: Conn,
     q: Annotated[str | None, Query(description="Text in the study or series description")] = None,
@@ -36,7 +37,7 @@ def search_series(
     min_slice_thickness: Annotated[float | None, Query(gt=0)] = None,
     modality: str | None = None,
     patient_id: str | None = None,
-    status: str | None = None,
+    status: SeriesStatus | None = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> dict:
@@ -55,12 +56,16 @@ def search_series(
     return {"items": items, "total": total}
 
 
-@router.get("/{series_id}")
+@router.get("/{series_id}", response_model=SeriesDetail)
 def get_series(series_id: int, conn: Conn) -> dict:
-    return _series_or_404(conn, series_id)
+    # The metadata and positions must describe the same version during a concurrent re-index.
+    conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+    series = _series_or_404(conn, series_id)
+    series["slices"] = repository.slice_positions(conn, series_id)
+    return series
 
 
-@router.get("/{series_id}/locate")
+@router.get("/{series_id}/locate", response_model=Located)
 def locate_slice(
     series_id: int,
     conn: Conn,
@@ -73,6 +78,7 @@ def locate_slice(
     """Resolve a location in mm, or a slice index, to the slice to display."""
     if (z is None) == (index is None):
         raise HTTPException(422, "Give exactly one of z or index")
+    conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
     series = _series_or_404(conn, series_id)
     slices = repository.slice_positions(conn, series_id)
     positions = [s["z_position"] for s in slices]
@@ -93,19 +99,22 @@ def locate_slice(
         "requested_z": z,
         "distance_mm": abs(hit["z_position"] - z) if z is not None else 0.0,
         "outside_volume": z is not None and not (series["z_min"] - half_step <= z <= series["z_max"] + half_step),
-        # where to draw the line on the sagittal image: 0 = top (z_max), 1 = bottom (z_min)
         "sagittal_fraction": (series["z_max"] - hit["z_position"]) / span if span else 0.0,
     }
 
 
 @router.get("/{series_id}/axial/{index}", response_class=Response, responses={200: {"content": {"image/png": {}}}})
-def axial_image(series_id: int, index: int, conn: Conn, window: Window = 400, level: Level = 40) -> Response:
-    series = _series_or_404(conn, series_id)
-    instance = repository.get_instance(conn, series_id, index)
+def axial_image(series_id: int, index: int, request: Request, window: Window = 400, level: Level = 40) -> Response:
+    with request.app.state.pool.connection() as conn:
+        instance = conn.execute(
+            "SELECT i.file_path, s.image_orientation FROM instances i JOIN series s ON s.id = i.series_id "
+            "WHERE i.series_id = %s AND i.slice_index = %s",
+            (series_id, index),
+        ).fetchone()
     if instance is None:
-        raise HTTPException(404, f"Slice {index} not found (series has {series['num_slices']})")
+        raise HTTPException(404, "Series or slice not found")
     try:
-        hu = load_slice_hu(instance["file_path"], series["image_orientation"])
+        hu = load_slice_hu(instance["file_path"], instance["image_orientation"])
     except FileNotFoundError:
         raise HTTPException(410, f"Source file is gone: {instance['file_path']}") from None
     except (ValueError, NotImplementedError, RuntimeError, AttributeError) as exc:
@@ -119,15 +128,25 @@ def _load_sagittal(path: str, mtime_ns: int) -> np.ndarray:  # mtime in the key:
 
 
 @router.get("/{series_id}/sagittal", response_class=Response, responses={200: {"content": {"image/png": {}}}})
-def sagittal_image(series_id: int, conn: Conn, window: Window = 400, level: Level = 40) -> Response:
-    series = _series_or_404(conn, series_id)
-    analysis = series["analysis"]
-    if analysis is None:
-        job = series["last_analysis_job"]
-        if job and job["status"] == "failed":
-            raise HTTPException(409, f"Analysis failed: [{job['error_code']}] {job['error_message']}")
-        raise HTTPException(409, "Sagittal view is not ready yet; the analysis job is still pending")
-    path = Path(analysis["sagittal_path"])
+def sagittal_image(series_id: int, request: Request, window: Window = 400, level: Level = 40) -> Response:
+    with request.app.state.pool.connection() as conn:
+        series = conn.execute(
+            "SELECT s.id, a.sagittal_path FROM series s LEFT JOIN analysis_results a ON a.series_id = s.id "
+            "WHERE s.id = %s",
+            (series_id,),
+        ).fetchone()
+        if series is None:
+            raise HTTPException(404, "Series not found")
+        if series["sagittal_path"] is None:
+            job = conn.execute(
+                "SELECT status, error_code, error_message FROM jobs WHERE series_id = %s AND kind = 'analyze' "
+                "ORDER BY id DESC LIMIT 1",
+                (series_id,),
+            ).fetchone()
+            if job and job["status"] == "failed":
+                raise HTTPException(409, f"Analysis failed: [{job['error_code']}] {job['error_message']}")
+            raise HTTPException(409, "Sagittal view is not ready yet; the analysis job is still pending")
+    path = Path(series["sagittal_path"])
     if not path.exists():
         raise HTTPException(410, "Analysis output is missing; retry the analysis job")
     plane = _load_sagittal(str(path), path.stat().st_mtime_ns)

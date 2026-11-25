@@ -17,9 +17,11 @@ export function MetadataTable({ series }: { series: SeriesDetail }) {
     ["Slice thickness", mm(series.slice_thickness)],
     [
       "Spacing between slices",
-      spacingTag !== null
-        ? mm(spacingTag)
-        : `${mm(series.computed_slice_spacing)} (computed; tag not in header)`,
+      spacingTag === null
+        ? `${mm(series.computed_slice_spacing)} (computed; tag not in header)`
+        : Math.abs(spacingTag - series.computed_slice_spacing) > 0.01
+          ? `${mm(spacingTag)} (header tag; slice positions are ${mm(series.computed_slice_spacing)} apart)`
+          : mm(spacingTag),
     ],
     ["Number of slices", String(series.num_slices)],
     ["Rows", String(series.rows)],

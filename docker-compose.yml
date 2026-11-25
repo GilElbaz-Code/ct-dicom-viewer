@@ -24,6 +24,8 @@ x-backend: &backend
     JOB_MAX_ATTEMPTS: ${JOB_MAX_ATTEMPTS:-3}
     JOB_LEASE_SECONDS: ${JOB_LEASE_SECONDS:-120}
     WORKER_KINDS: ${WORKER_KINDS:-ingest,analyze}
+    MAX_UPLOAD_FILE_MB: ${MAX_UPLOAD_FILE_MB:-50}
+    MAX_UPLOAD_TOTAL_MB: ${MAX_UPLOAD_TOTAL_MB:-2048}
   restart: unless-stopped
 
 services:

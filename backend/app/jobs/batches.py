@@ -81,8 +81,12 @@ def _summarize(batch: dict, counts: dict) -> dict:
     }
 
 
-def list_batches(conn: Connection, *, limit: int = 50) -> list[dict]:
-    batches = conn.execute("SELECT * FROM batches ORDER BY id DESC LIMIT %s", (limit,)).fetchall()
+def list_batches(conn: Connection, *, limit: int = 50, offset: int = 0, before_id: int | None = None) -> list[dict]:
+    batches = conn.execute(
+        "SELECT * FROM batches WHERE %(before)s::bigint IS NULL OR id < %(before)s "
+        "ORDER BY id DESC LIMIT %(limit)s OFFSET %(offset)s",
+        {"before": before_id, "limit": limit, "offset": offset},
+    ).fetchall()
     counts = _counts(conn, [b["id"] for b in batches])
     return [_summarize(b, counts[b["id"]]) for b in batches]
 

@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import os
+import shutil
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
 import psycopg
 import pytest
+from fastapi.testclient import TestClient
 
 from app.config import Settings, get_settings
+from app.main import create_app
 from app.tools.synthetic import write_series
+from app.worker import Worker
 
 
 @pytest.fixture(scope="session")
@@ -62,3 +66,14 @@ def database_url(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
         get_settings.cache_clear()
         with psycopg.connect(admin_url, autocommit=True) as conn:
             conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+
+
+@pytest.fixture
+def env(database_url: str, data_roots: Settings, small_series: Path):
+    """API client, one worker and settings over a fresh database with one library series (`series_a`)."""
+    shutil.copytree(small_series, data_roots.library_root / "series_a")
+    settings = get_settings()
+    worker = Worker(settings)
+    with TestClient(create_app()) as client:
+        yield client, worker, settings
+    worker.pool.close()

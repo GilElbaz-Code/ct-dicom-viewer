@@ -60,6 +60,7 @@ export interface Series {
 }
 
 export interface SeriesDetail extends Series {
+  slices: { slice_index: number; z_position: number; instance_number: number | null }[];
   analysis: {
     job_id: number;
     sagittal_geometry: SagittalGeometry;

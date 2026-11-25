@@ -4,6 +4,7 @@ A handler has two steps:
   run(job, ctx)               slow work outside any transaction (reading files, computing,
                               writing derived files)
   persist(conn, job, payload) fast writes inside the transaction that also marks the job succeeded
+  after_commit(payload, ctx)  housekeeping once this worker's result is committed (never on a lost lease)
 
 Keeping the slow part outside the transaction means no locks are held while a
 1 GB series is read, and the database never sees half of a result.
@@ -11,7 +12,7 @@ Keeping the slow part outside the transaction means no locks are held while a
 
 from __future__ import annotations
 
-import json
+import contextlib
 import os
 import uuid
 from dataclasses import dataclass
@@ -40,6 +41,7 @@ class JobContext:
 class Handler(Protocol):
     def run(self, job: dict, ctx: JobContext) -> Any: ...
     def persist(self, conn: Connection, job: dict, payload: Any, ctx: JobContext) -> dict: ...
+    def after_commit(self, payload: Any, ctx: JobContext) -> None: ...
     def on_final_failure(self, conn: Connection, job: dict, error: JobError) -> None: ...
 
 
@@ -72,6 +74,9 @@ class IngestHandler:
             "analysis_job_id": analysis["id"] if analysis else None,
         }
 
+    def after_commit(self, payload: tuple[Path, SeriesInfo], ctx: JobContext) -> None:
+        pass
+
     def on_final_failure(self, conn: Connection, job: dict, error: JobError) -> None:
         pass
 
@@ -81,6 +86,7 @@ class AnalyzeHandler:
 
     def run(self, job: dict, ctx: JobContext) -> tuple[dict, AnalysisOutput, Path]:
         with ctx.pool.connection() as conn:
+            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             series = repository.get_series(conn, job["series_id"]) if job["series_id"] else None
             instances = repository.list_instances(conn, series["id"]) if series else []
         if not series or not instances:
@@ -99,9 +105,10 @@ class AnalyzeHandler:
         )
         # The numeric database id names the folder: header values (UIDs) never become path components.
         out_dir = ctx.settings.derived_root / str(int(series["id"]))
-        sagittal_path = out_dir / "sagittal.npy"
+        # Immutable per execution, including manual retries (which reset the attempt counter).
+        # A worker that loses its lease may still finish writing, but cannot replace a published file.
+        sagittal_path = out_dir / f"sagittal-{uuid.uuid4().hex}.npy"
         _atomic_save(sagittal_path, output.sagittal)
-        (out_dir / "qc.json").write_text(json.dumps(output.qc, indent=2))
         return series, output, sagittal_path
 
     def persist(self, conn: Connection, job: dict, payload: tuple[dict, AnalysisOutput, Path], ctx: JobContext) -> dict:
@@ -118,6 +125,18 @@ class AnalyzeHandler:
         )
         return {"series_id": series["id"], "qc": output.qc}
 
+    def after_commit(self, payload: tuple[dict, AnalysisOutput, Path], ctx: JobContext) -> None:
+        """Remove files older than the one just published: superseded results, stale workers' output, temp files.
+
+        Only older ones: a newer file may belong to a later analysis that has not committed yet.
+        """
+        published = payload[2]
+        cutoff = published.stat().st_mtime_ns
+        for path in published.parent.glob("*.npy"):  # includes the hidden .tmp.npy files
+            with contextlib.suppress(FileNotFoundError):
+                if path != published and path.stat().st_mtime_ns < cutoff:
+                    path.unlink()
+
     def on_final_failure(self, conn: Connection, job: dict, error: JobError) -> None:
         if job["series_id"]:
             repository.set_series_status(conn, job["series_id"], "analysis_failed")
@@ -127,8 +146,11 @@ def _atomic_save(path: Path, array: np.ndarray) -> None:
     """Write to a temp file then rename, so readers never see a half-written array."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.stem}-{uuid.uuid4().hex}.tmp.npy")  # unique: two attempts never share it
-    np.save(tmp, array)
-    os.replace(tmp, path)
+    try:
+        np.save(tmp, array)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 HANDLERS: dict[str, Handler] = {"ingest": IngestHandler(), "analyze": AnalyzeHandler()}
