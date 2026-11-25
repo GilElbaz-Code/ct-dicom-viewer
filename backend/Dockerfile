@@ -32,7 +32,7 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-
 # --- test: runtime + dev tools + tests (CI: docker build --target test) ----------------------
 FROM runtime AS test
 USER root
-COPY requirements-dev.txt .
+COPY requirements.txt requirements-dev.txt ./
 RUN pip install -r requirements-dev.txt
 COPY pyproject.toml ./
 COPY tests ./tests
