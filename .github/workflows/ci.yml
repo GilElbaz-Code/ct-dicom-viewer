@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Lint and test inside the same image that ships (its `test` stage), against a real Postgres.
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: ctviewer
+          POSTGRES_PASSWORD: ci-only
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ctviewer" --health-interval 5s --health-timeout 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build test image
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          target: test
+          tags: ct-viewer-backend:test
+          load: true
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,scope=backend,mode=max
+      - name: Lint
+        run: docker run --rm ct-viewer-backend:test sh -c "ruff check --no-cache . && ruff format --no-cache --check ."
+      - name: Unit and integration tests
+        run: >
+          docker run --rm --network host
+          -e TEST_DATABASE_URL=postgresql://ctviewer:ci-only@localhost:5432/postgres
+          ct-viewer-backend:test
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run build  # type-check + production bundle
+
+  # The whole stack as a user would run it: compose up, demo data, end-to-end smoke test.
+  e2e:
+    needs: [backend, frontend]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start the stack
+        run: docker compose up --build -d
+      - name: Generate a synthetic series
+        run: docker compose --profile tools run --rm demo-data
+      - name: Smoke test
+        run: scripts/smoke_test.sh synthetic_chest
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs --no-color --tail 200
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  # On main only: publish versioned images (tagged with the commit SHA) to GitHub Container Registry.
+  publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [e2e]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - name: backend
+            context: backend
+            target: runtime
+          - name: web
+            context: frontend
+            target: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}  # short-lived token issued per run; no stored secret
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          target: ${{ matrix.target }}
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/${{ matrix.name }}:${{ github.sha }}
+            ghcr.io/${{ github.repository }}/${{ matrix.name }}:latest
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,scope=${{ matrix.name }},mode=max

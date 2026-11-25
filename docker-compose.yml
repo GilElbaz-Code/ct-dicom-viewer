@@ -1,0 +1,115 @@
+# CT DICOM viewer: docker compose up --build   ->  http://localhost:8080
+#
+#   web ──/api──▶ api ──▶ db ◀── worker (x2)
+#    nginx        FastAPI   Postgres   claims jobs with SKIP LOCKED
+#
+# Only `web` publishes a port. Everything else talks on the private compose network by service name.
+
+name: ct-viewer
+
+x-backend: &backend
+  build:
+    context: ./backend
+    target: runtime
+  image: ct-viewer-backend:local
+  environment: &backend-env
+    POSTGRES_HOST: db
+    POSTGRES_DB: ${POSTGRES_DB:-ctviewer}
+    POSTGRES_USER: ${POSTGRES_USER:-ctviewer}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ctviewer-dev-only}
+    LIBRARY_ROOT: /data/library
+    UPLOAD_ROOT: /data/uploads
+    DERIVED_ROOT: /data/derived
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  restart: unless-stopped
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ctviewer}
+      POSTGRES_USER: ${POSTGRES_USER:-ctviewer}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ctviewer-dev-only}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # One-shot: applies SQL migrations, then exits. api and worker wait for it to succeed.
+  migrate:
+    <<: *backend
+    command: ["python", "-m", "app.migrate"]
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    <<: *backend
+    environment:
+      <<: *backend-env
+      WEB_CONCURRENCY: "2"
+    volumes:
+      - ${DICOM_LIBRARY_DIR:-./data}:/data/library:ro
+      - uploads:/data/uploads
+      - derived:/data/derived:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  worker:
+    <<: *backend
+    command: ["python", "-m", "app.worker"]
+    volumes:
+      - ${DICOM_LIBRARY_DIR:-./data}:/data/library:ro
+      - uploads:/data/uploads:ro
+      - derived:/data/derived
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    deploy:
+      replicas: ${WORKER_REPLICAS:-2}
+    # Unhealthy if the polling loop has not touched its heartbeat file for a minute.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, sys, time; sys.exit(time.time() - os.path.getmtime('/tmp/worker-heartbeat') > 60)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    stop_grace_period: 2m  # SIGTERM lets the current job finish
+
+  web:
+    build: ./frontend
+    image: ct-viewer-web:local
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Optional: writes a synthetic CT series into the library.
+  #   docker compose --profile tools run --rm demo-data
+  demo-data:
+    <<: *backend
+    profiles: ["tools"]
+    user: root  # the bind-mounted host folder may not be writable by the image user; files are chowned back
+    command: ["python", "-m", "app.tools.synthetic", "/data/library/synthetic_chest", "--slices", "200"]
+    volumes:
+      - ${DICOM_LIBRARY_DIR:-./data}:/data/library
+    restart: "no"
+
+volumes:
+  pgdata:
+  uploads:
+  derived:
