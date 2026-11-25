@@ -94,3 +94,9 @@ def test_analysis_streams_the_volume(small_series: Path) -> None:
     assert out.qc["hu_p01"] == -1000
     assert out.qc["slice_gaps"] == 0
     assert out.qc["body_volume_ml_estimate"] > 0
+
+
+def test_sagittal_clips_instead_of_wrapping_int16() -> None:
+    columns = np.array([[40000.0], [-40000.0]], dtype=np.float32)
+    plane, _ = resample_sagittal(columns, np.array([0.0, 1.0]), mm_per_pixel_y=1.0, column_index=0)
+    assert plane[:, 0].tolist() == [-32768, 32767]

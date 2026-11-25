@@ -41,8 +41,10 @@ class _LeaseKeeper(threading.Thread):
         self.done = threading.Event()
 
     def run(self) -> None:
-        interval = max(1.0, self.ctx.settings.job_lease_seconds / 3)
+        # Short enough for the 60 s healthcheck: a long job must not look like a hung worker.
+        interval = max(1.0, min(15.0, self.ctx.settings.job_lease_seconds / 3))
         while not self.done.wait(interval):
+            Path(self.ctx.settings.worker_heartbeat_file).touch()
             try:
                 with self.ctx.pool.connection() as conn:
                     if not queue.extend_lease(conn, self.job_id, self.worker_id, self.ctx.settings.job_lease_seconds):

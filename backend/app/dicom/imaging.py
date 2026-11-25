@@ -113,4 +113,4 @@ def resample_sagittal(
         mm_per_pixel_y=mm_per_pixel_y,
         column_index=column_index,
     )
-    return np.round(plane).astype(np.int16), geometry
+    return np.clip(np.round(plane), -32768, 32767).astype(np.int16), geometry

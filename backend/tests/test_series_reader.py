@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -89,3 +90,66 @@ def test_warns_about_gaps(tmp_path: Path) -> None:
     assert info.computed_slice_spacing == pytest.approx(2.0)
     assert any("gap" in w for w in info.warnings)
     assert np.isclose(max(np.diff([s.z for s in info.slices])), 6.0)
+
+
+def _rewrite(directory: Path, change) -> None:
+    import pydicom
+
+    for i, f in enumerate(sorted(directory.glob("*.dcm"), key=lambda p: float(pydicom.dcmread(p).SliceLocation))):
+        ds = pydicom.dcmread(f)
+        change(ds, i)
+        ds.save_as(f)
+
+
+@pytest.mark.parametrize(
+    "orientation",
+    [
+        [0, 1, 0, -1, 0, 0],  # rotated 90° in plane: the "sagittal" column would really be coronal
+        [1, 0, 0, 0, 0.97, 0.243],  # ~14° gantry tilt: still roughly axial, but sheared
+    ],
+)
+def test_rejects_rotated_or_tilted_planes(small_series: Path, tmp_path: Path, orientation) -> None:
+    target = shutil.copytree(small_series, tmp_path / "rotated")
+    _rewrite(target, lambda ds, i: setattr(ds, "ImageOrientationPatient", orientation))
+    with pytest.raises(SeriesValidationError) as err:
+        read_series_headers(target)
+    assert err.value.code == "unsupported_orientation"
+
+
+def test_accepts_flipped_axial_planes(small_series: Path, tmp_path: Path) -> None:
+    target = shutil.copytree(small_series, tmp_path / "flipped")
+    _rewrite(target, lambda ds, i: setattr(ds, "ImageOrientationPatient", [-1, 0, 0, 0, -1, 0]))
+    assert read_series_headers(target).num_slices == 40
+
+
+def test_rejects_drifting_slice_origins(small_series: Path, tmp_path: Path) -> None:
+    target = shutil.copytree(small_series, tmp_path / "drift")
+
+    def shift(ds, i):
+        x, y, z = (float(v) for v in ds.ImagePositionPatient)
+        ds.ImagePositionPatient = [x, y + 0.5 * i, z]  # 20 mm over 40 slices
+
+    _rewrite(target, shift)
+    with pytest.raises(SeriesValidationError) as err:
+        read_series_headers(target)
+    assert err.value.code == "position_drift"
+
+
+def test_nonstandard_uid_is_a_warning_not_a_path(small_series: Path, tmp_path: Path) -> None:
+    target = shutil.copytree(small_series, tmp_path / "bad_uid")
+    _rewrite(target, lambda ds, i: setattr(ds, "SeriesInstanceUID", "../../outside"))
+    info = read_series_headers(target)
+    assert any("not a standard DICOM UID" in w for w in info.warnings)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_unreadable_subdirectory_fails_instead_of_shrinking_the_series(small_series: Path, tmp_path: Path) -> None:
+    target = shutil.copytree(small_series, tmp_path / "locked")
+    locked = target / "more"
+    locked.mkdir()
+    locked.chmod(0)
+    try:
+        with pytest.raises(PermissionError):
+            read_series_headers(target)
+    finally:
+        locked.chmod(0o755)

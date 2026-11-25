@@ -41,12 +41,14 @@ and `derived` would be on shared storage or an object store so workers can run o
 ## How the services reach each other
 
 Compose puts every service on one private network and resolves **service names** through Docker's DNS: the
-API connects to `db:5432`, nginx proxies `/api/` to `api:8000`. **Only `web` publishes a port** (8080 on the
-host). Postgres and the API are not reachable from outside, so the database needs no public exposure at all.
+API connects to `db:5432`, nginx proxies `/api/` to `api:8000`. **Only `web` publishes a port**: 8080 on the host,
+bound to `127.0.0.1` by default because the demo has no login (`WEB_BIND=0.0.0.0` opens it to the network). Postgres and the API are not reachable from outside, so the database needs no public exposure at all.
 
 * The browser talks only to nginx (same origin for the app and `/api`, so there is no CORS to configure).
 * nginx resolves `api` per request (`resolver 127.0.0.11`), so a recreated API container with a new IP is
-  picked up without restarting nginx, and it removes any `X-Forwarded-User` header a browser sends.
+  picked up without restarting nginx. It also overwrites `X-Forwarded-User`, so a browser cannot claim an
+  identity. In production the SSO check runs *in* this nginx (`auth_request` to oauth2-proxy), and the same
+  line sets the header from the verified session instead of clearing it.
 * Workers never talk to the API: they coordinate only through Postgres (job rows) and the shared volumes.
   That is why `docker compose up --scale worker=5` just works.
 * Start order is explicit: `db` healthy → `migrate` (one-shot) completed successfully → `api` and `worker` →
@@ -83,7 +85,10 @@ written to be backward-compatible (add columns first, remove them a release late
   ([`backend/app/config.py`](../backend/app/config.py)), the same convention the official Postgres image uses.
 * **In CI** the registry login uses the per-run `GITHUB_TOKEN`, which expires with the job, so no long-lived
   credential is stored. The test database password is a throw-away value that exists only inside the runner.
-* Rotate by updating the secret and restarting the services; no image rebuild is needed.
+* Rotate in two steps, because `POSTGRES_PASSWORD` is only read when the database volume is first created:
+  `ALTER ROLE ctviewer PASSWORD '…'` in Postgres, then update the secret and restart `api` and `worker`.
+  No image rebuild is needed. The app builds its connection string with psycopg's `make_conninfo`, so any
+  characters are safe in the password.
 
 ## Knowing the service is healthy in production
 

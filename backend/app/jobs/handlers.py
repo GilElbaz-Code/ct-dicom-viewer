@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -96,7 +97,8 @@ class AnalyzeHandler:
             pixel_spacing=pixel_spacing,
             slice_spacing=series["computed_slice_spacing"],
         )
-        out_dir = ctx.settings.derived_root / series["series_instance_uid"]
+        # The numeric database id names the folder: header values (UIDs) never become path components.
+        out_dir = ctx.settings.derived_root / str(int(series["id"]))
         sagittal_path = out_dir / "sagittal.npy"
         _atomic_save(sagittal_path, output.sagittal)
         (out_dir / "qc.json").write_text(json.dumps(output.qc, indent=2))
@@ -104,6 +106,13 @@ class AnalyzeHandler:
 
     def persist(self, conn: Connection, job: dict, payload: tuple[dict, AnalysisOutput, Path], ctx: JobContext) -> dict:
         series, output, sagittal_path = payload
+        # Re-indexed while we were reading pixels? Then these results describe the old slice list.
+        # Retry (not fail): the next attempt analyzes the current slices.
+        current = conn.execute("SELECT updated_at FROM series WHERE id = %s FOR UPDATE", (series["id"],)).fetchone()
+        if current is None or current["updated_at"] != series["updated_at"]:
+            raise JobError(
+                "series_changed", "The series was re-indexed during analysis; analyzing again", retryable=True
+            )
         repository.save_analysis(
             conn, series["id"], job["id"], str(sagittal_path), output.geometry.to_dict(), output.qc
         )
@@ -117,7 +126,7 @@ class AnalyzeHandler:
 def _atomic_save(path: Path, array: np.ndarray) -> None:
     """Write to a temp file then rename, so readers never see a half-written array."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp.npy")
+    tmp = path.with_name(f".{path.stem}-{uuid.uuid4().hex}.tmp.npy")  # unique: two attempts never share it
     np.save(tmp, array)
     os.replace(tmp, path)
 

@@ -21,6 +21,9 @@ x-backend: &backend
     UPLOAD_ROOT: /data/uploads
     DERIVED_ROOT: /data/derived
     LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    JOB_MAX_ATTEMPTS: ${JOB_MAX_ATTEMPTS:-3}
+    JOB_LEASE_SECONDS: ${JOB_LEASE_SECONDS:-120}
+    WORKER_KINDS: ${WORKER_KINDS:-ingest,analyze}
   restart: unless-stopped
 
 services:
@@ -92,7 +95,8 @@ services:
     build: ./frontend
     image: ct-viewer-web:local
     ports:
-      - "${WEB_PORT:-8080}:80"
+      # Localhost only by default: the demo has no login. WEB_BIND=0.0.0.0 exposes it on the network.
+      - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-8080}:80"
     depends_on:
       api:
         condition: service_healthy

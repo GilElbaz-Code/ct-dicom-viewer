@@ -56,6 +56,7 @@ export interface Series {
   study_description: string | null;
   study_date: string | null;
   created_at: string;
+  updated_at: string;
 }
 
 export interface SeriesDetail extends Series {

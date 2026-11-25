@@ -39,8 +39,9 @@ export const api = {
     request<{ items: Series[]; total: number }>(`/series${query({ limit: 500, ...params })}`),
   getSeries: (id: number) => request<SeriesDetail>(`/series/${id}`),
   locate: (id: number, by: { z: number } | { index: number }) => request<Located>(`/series/${id}/locate${query(by)}`),
-  axialUrl: (id: number, index: number, window: number, level: number) =>
-    `/api/series/${id}/axial/${index}${query({ window, level })}`,
+  // `version` changes when a series is re-indexed, so the browser never shows a cached slice of the old files
+  axialUrl: (id: number, index: number, window: number, level: number, version: string) =>
+    `/api/series/${id}/axial/${index}${query({ window, level, v: version })}`,
   sagittalUrl: (id: number, window: number, level: number, version: string) =>
     `/api/series/${id}/sagittal${query({ window, level, v: version })}`,
 

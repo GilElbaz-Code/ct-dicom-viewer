@@ -65,7 +65,8 @@ def locate_slice(
     series_id: int,
     conn: Conn,
     z: Annotated[
-        float | None, Query(description="Location along the patient axis, mm (ImagePositionPatient z)")
+        float | None,
+        Query(allow_inf_nan=False, description="Location along the patient axis, mm (ImagePositionPatient z)"),
     ] = None,
     index: Annotated[int | None, Query(description="Slice index, 0 = most inferior")] = None,
 ) -> dict:

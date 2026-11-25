@@ -33,7 +33,10 @@ export function Viewer({ seriesId, onSelectSeries }: Props) {
 
   const [width, setWidth] = useState(400);
   const [level, setLevel] = useState(40);
-  const windowing = useDebounced({ width, level }, 200);
+  // Debounce the two numbers separately: a fresh {width, level} object on every render would never settle.
+  const debouncedWidth = useDebounced(width, 200);
+  const debouncedLevel = useDebounced(level, 200);
+  const windowing = { width: debouncedWidth, level: debouncedLevel };
 
   useEffect(() => {
     api
@@ -112,7 +115,9 @@ export function Viewer({ seriesId, onSelectSeries }: Props) {
 
   const [axialFailed, setAxialFailed] = useState<string | null>(null);
   const axialSrc =
-    series && located ? api.axialUrl(series.id, located.index, windowing.width, windowing.level) : null;
+    series && located
+      ? api.axialUrl(series.id, located.index, windowing.width, windowing.level, series.updated_at)
+      : null;
 
   const preset = PRESETS.find((p) => p.width === width && p.level === level)?.name ?? "custom";
   const geometry = series?.analysis?.sagittal_geometry;

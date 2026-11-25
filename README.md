@@ -177,7 +177,8 @@ setting `DATABASE_URL`, `LIBRARY_ROOT`, `UPLOAD_ROOT` and `DERIVED_ROOT`.
 |---|---|---|
 | `DICOM_LIBRARY_DIR` | `./data` | Host folder mounted read-only as the DICOM library |
 | `WEB_PORT` | `8080` | Host port of the web app |
-| `POSTGRES_PASSWORD` | `ctviewer-dev-only` | Database password (set it in `.env`; see `.env.example`) |
+| `WEB_BIND` | `127.0.0.1` | Interface it listens on; `0.0.0.0` opens it to your network (the demo has no login) |
+| `POSTGRES_PASSWORD` | `ctviewer-dev-only` | Database password (set it in `.env` before the first start; it is applied only when the database volume is created) |
 | `WORKER_REPLICAS` | `2` | Number of worker containers |
 | `JOB_MAX_ATTEMPTS` | `3` | Attempts for retryable errors |
 | `JOB_LEASE_SECONDS` | `120` | Lease before a silent worker's job is reclaimed |

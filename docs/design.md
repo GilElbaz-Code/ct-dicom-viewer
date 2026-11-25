@@ -15,8 +15,9 @@ this repository implements a working slice of it (see [What the slice implements
    through the browser; uploads land in a separate area owned by the service.
 3. **Users.** Tens of researchers, not thousands. Peak load is a batch of a few hundred to a few thousand
    studies, not a stream of requests. Interactive viewing must feel instant; batch processing may take hours.
-4. **Identity.** The institute has single sign-on (OIDC/SAML). An authenticating reverse proxy in front of the
-   app passes the user's identity in a header. All researchers in the group may see all indexed series.
+4. **Identity.** The institute has single sign-on (OIDC/SAML). The app's nginx checks each request against an
+   OIDC proxy (`auth_request`) and passes the verified user to the API in a header it always overwrites.
+   All researchers in the group may see all indexed series.
 5. **Analysis.** "Processing" is a pluggable step (today: viewer artifacts and QC; tomorrow: segmentation or a
    model on a GPU). It can take minutes, can fail, and must not block metadata from being searchable.
 6. **Deployment.** On-premises containers (Docker Compose for one host, Kubernetes for several), because the
@@ -27,7 +28,7 @@ this repository implements a working slice of it (see [What the slice implements
 
 ```mermaid
 flowchart LR
-    user([Researcher<br/>browser]) --> sso[SSO reverse proxy<br/>OIDC] --> web
+    user([Researcher<br/>browser]) --> sso[SSO login<br/>OIDC] --> web
     subgraph app[CT processing service]
         web[Web app<br/>React + nginx] -- /api --> api[API<br/>FastAPI]
         api -- submit jobs,<br/>query metadata --> db[(PostgreSQL<br/>metadata index<br/>+ job queue)]
@@ -213,7 +214,9 @@ axial PNG ~20 ms, sagittal PNG ~15 ms. On network storage both jobs are I/O boun
   storage mounted read-only, containers run as non-root, database not published outside the private network.
 * User input never becomes a raw path: paths are resolved (symlinks and `..` included) and must stay inside an
   allowed root, so `../../etc` or a symlink out of the library is rejected.
-* Identity comes only from the SSO proxy; the app's own nginx strips any `X-Forwarded-User` sent by a browser.
+* Identity comes only from the SSO check: the app's nginx validates the session (`auth_request` to an OIDC proxy
+  such as oauth2-proxy) and sets `X-Forwarded-User` itself, overwriting anything a browser sends. In the
+  slice, with no SSO, it sets the header to empty, so every user is `anonymous`.
   Jobs and batches record `submitted_by`, so "my jobs" and audit questions are answerable.
 
 ## Observability

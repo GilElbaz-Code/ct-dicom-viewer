@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import os
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,6 +29,9 @@ log = logging.getLogger(__name__)
 DICOMDIR_SOP_CLASS = "1.2.840.10008.1.3.10"
 REQUIRED_IMAGE_TAGS = ("Rows", "Columns", "ImagePositionPatient", "ImageOrientationPatient")
 POSITION_TOLERANCE_MM = 1e-3
+IN_PLANE_TOLERANCE = 0.999  # |cosine| of rows along x and columns along y: rejects rotated or tilted planes
+ORIGIN_DRIFT_TOLERANCE_MM = 1.0  # max x/y movement of slice origins across the stack
+UID_PATTERN = re.compile(r"^[0-9]+(\.[0-9]+)*$")  # DICOM UI value: digits and dots, max 64 chars
 
 # Extra header fields kept in series.attributes (JSONB) for cross-study queries.
 ATTRIBUTE_KEYWORDS = (
@@ -96,8 +100,13 @@ class SeriesInfo:
         return self.slices[-1].z
 
 
+def _raise(error: OSError) -> None:
+    raise error
+
+
 def _iter_files(directory: Path):
-    for root, dirs, files in os.walk(directory):
+    # onerror: an unreadable sub-directory must fail the job (retryable io_error), not shrink the series
+    for root, dirs, files in os.walk(directory, onerror=_raise):
         dirs[:] = sorted(d for d in dirs if not d.startswith("."))
         for name in sorted(files):
             if not name.startswith("."):
@@ -237,6 +246,23 @@ def read_series_headers(directory: Path) -> SeriesInfo:
             "not_axial",
             f"Series is not axial (slice normal {np.round(normal, 3).tolist()}); the viewer expects axial CT",
         )
+    # Display only flips axes, so rows must run along patient x and columns along y. A rotated or tilted
+    # plane would otherwise turn the "sagittal" view into a coronal or sheared one.
+    if abs(orientation[0]) < IN_PLANE_TOLERANCE or abs(orientation[4]) < IN_PLANE_TOLERANCE:
+        raise SeriesValidationError(
+            "unsupported_orientation",
+            f"ImageOrientationPatient {np.round(orientation, 3).tolist()} is rotated or tilted; "
+            "only standard axial orientation is supported",
+        )
+    origins = np.array([[float(v) for v in ds.ImagePositionPatient] for _, ds in items])
+    if not np.isfinite(origins).all():
+        raise SeriesValidationError("invalid_position", "ImagePositionPatient contains non-numeric values")
+    drift = float(np.ptp(origins[:, :2], axis=0).max())
+    if drift > ORIGIN_DRIFT_TOLERANCE_MM:
+        raise SeriesValidationError(
+            "position_drift",
+            f"Slice origins move {drift:.1f} mm in x/y across the stack (gantry tilt or sheared volume); not supported",
+        )
 
     slices = sorted(
         (
@@ -272,6 +298,9 @@ def read_series_headers(directory: Path) -> SeriesInfo:
         warnings.append("PixelSpacing missing; physical sizes are unknown")
     if skipped:
         warnings.append(f"Skipped {skipped} file(s) that are not DICOM images")
+    if len(series_uid) > 64 or not UID_PATTERN.match(series_uid):
+        # Never used in file paths (derived data is stored by numeric id), so a warning is enough.
+        warnings.append(f"SeriesInstanceUID is not a standard DICOM UID: {series_uid[:80]!r}")
 
     return SeriesInfo(
         study_instance_uid=str(first.get("StudyInstanceUID", "")) or f"unknown-study-{series_uid}",

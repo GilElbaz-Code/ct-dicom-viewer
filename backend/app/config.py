@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
+from psycopg.conninfo import make_conninfo
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -40,7 +42,8 @@ def _database_url() -> str:
     host = os.environ.get("POSTGRES_HOST", "localhost")
     port = os.environ.get("POSTGRES_PORT", "5432")
     db = os.environ.get("POSTGRES_DB", "ctviewer")
-    return f"postgresql://{user}:{password}@{host}:{port}/{db}"
+    # make_conninfo quotes every value, so a password with @ / : or spaces cannot break the connection string
+    return make_conninfo(user=user, password=password, host=host, port=port, dbname=db)
 
 
 @lru_cache

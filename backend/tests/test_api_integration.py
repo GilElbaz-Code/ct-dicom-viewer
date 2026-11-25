@@ -16,6 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
+from app import repository
 from app.config import Settings, get_settings
 from app.errors import JobError
 from app.jobs import queue
@@ -238,3 +239,56 @@ def test_library_listing_health_and_stats(env) -> None:
     assert client.get("/api/ready").json()["status"] == "ok"
     stats = client.get("/api/stats").json()
     assert stats["jobs_by_status"] == {"succeeded": 2} and stats["series_by_status"] == {"ready": 1}
+
+
+def test_analysis_output_is_stored_under_the_numeric_series_id(env) -> None:
+    client, worker, settings = env
+    client.post("/api/jobs", json={"path": "series_a"})
+    drain(worker)
+    series = client.get("/api/series").json()["items"][0]
+    path = Path(client.get(f"/api/series/{series['id']}").json()["analysis"]["sagittal_path"])
+    assert path == settings.derived_root / str(series["id"]) / "sagittal.npy"
+    assert not list(path.parent.glob("*.tmp.npy"))  # temp files are renamed away
+
+
+def test_series_reindexed_during_analysis_is_analyzed_again(env, monkeypatch) -> None:
+    client, worker, settings = env
+    client.post("/api/jobs", json={"path": "series_a"})
+    worker.run_once()  # ingest: 40 slices, analysis queued
+
+    handler = HANDLERS["analyze"]
+    original_run = handler.run
+
+    def run_then_reindex(job, ctx):
+        payload = original_run(job, ctx)  # pixels of the 40-slice series are read...
+        for f in sorted((settings.library_root / "series_a").glob("*.dcm"))[:2]:
+            f.unlink()  # ...then someone removes two slices and re-indexes before the results are saved
+        directory, info = HANDLERS["ingest"].run({"source_path": "series_a"}, ctx)
+        with ctx.pool.connection() as conn:
+            repository.upsert_series(conn, info, str(directory))
+        return payload
+
+    monkeypatch.setattr(handler, "run", run_then_reindex)
+    worker.run_once()
+    job = client.get("/api/jobs", params={"kind": "analyze"}).json()[0]
+    assert job["status"] == "queued" and job["error_code"] == "series_changed"  # stale result not published
+    series = client.get(f"/api/series/{job['series_id']}").json()
+    assert series["status"] == "indexed" and series["analysis"] is None
+
+    monkeypatch.setattr(handler, "run", original_run)
+    with worker.pool.connection() as conn:  # skip the retry backoff
+        conn.execute("UPDATE jobs SET run_after = now() WHERE id = %s", (job["id"],))
+        conn.commit()
+    drain(worker)
+    series = client.get(f"/api/series/{job['series_id']}").json()
+    assert series["status"] == "ready" and series["num_slices"] == 38
+    assert client.get(f"/api/jobs/{job['id']}").json()["attempts"] == 2
+
+
+def test_locate_rejects_non_finite_locations(env) -> None:
+    client, worker, _ = env
+    client.post("/api/jobs", json={"path": "series_a"})
+    drain(worker)
+    series_id = client.get("/api/series").json()["items"][0]["id"]
+    for bad in ("nan", "inf", "-inf"):
+        assert client.get(f"/api/series/{series_id}/locate", params={"z": bad}).status_code == 422
