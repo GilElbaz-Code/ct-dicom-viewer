@@ -27,32 +27,30 @@ CREATE INDEX series_slice_thickness_idx ON series (slice_thickness);
 CREATE INDEX series_study_uid_idx ON series (study_uid);
 
 CREATE TABLE jobs (
-    id           bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    path         text NOT NULL,                     -- DICOM directory as the user submitted it
-    batch_id     uuid,                              -- shared by all jobs created from one CSV
-    status       text NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'done', 'failed')),
-    error        text,                              -- why it failed, shown to the user
-    series_id    bigint REFERENCES series (id) ON DELETE SET NULL,
-    created_at   timestamptz NOT NULL DEFAULT now(),
-    finished_at  timestamptz
+    id                  bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    path                text NOT NULL,              -- DICOM directory as the user submitted it
+    batch_id            uuid,                       -- shared by all jobs created from one CSV
+    status              text NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'done', 'failed')),
+    stage               text NOT NULL DEFAULT 'queued',  -- progress shown to the user: headers, analysis, complete
+    error               text,                       -- why it failed, shown to the user
+    series_id           bigint REFERENCES series (id) ON DELETE SET NULL,
+    attempt_count       int NOT NULL DEFAULT 0,     -- attempts started; capped by MAX_ATTEMPTS
+    attempt_token       uuid,                       -- fencing token: only the current attempt may write
+    attempt_started_at  timestamptz,                -- the hard deadline counts from here
+    lease_expires_at    timestamptz,                -- renewed by the worker's heartbeat; expiry means recovery
+    created_at          timestamptz NOT NULL DEFAULT now(),
+    finished_at         timestamptz
 );
 
 CREATE INDEX jobs_batch_id_idx ON jobs (batch_id);
+CREATE INDEX jobs_expired_lease_idx ON jobs (lease_expires_at) WHERE status = 'running';
 
--- Durable dispatch: attempt leases and the outbox.
-ALTER TABLE jobs ADD COLUMN attempt_count integer NOT NULL DEFAULT 0;
-ALTER TABLE jobs ADD COLUMN attempt_token uuid;
-ALTER TABLE jobs ADD COLUMN lease_expires_at timestamptz;
-ALTER TABLE jobs ADD COLUMN attempt_started_at timestamptz;
-ALTER TABLE jobs ADD COLUMN stage text NOT NULL DEFAULT 'queued';
-CREATE INDEX jobs_expired_lease_idx ON jobs(lease_expires_at) WHERE status = 'running';
+-- Transactional outbox: a job and its dispatch commit together; the relay publishes due rows to Redis.
 CREATE TABLE job_outbox (
-    job_id bigint PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
-    next_dispatch_at timestamptz NOT NULL DEFAULT now(),
-    published_at timestamptz,
-    last_error text
+    job_id            bigint PRIMARY KEY REFERENCES jobs (id) ON DELETE CASCADE,
+    next_dispatch_at  timestamptz NOT NULL DEFAULT now(),  -- publish (again) at or after this time
+    published_at      timestamptz,                          -- NULL while waiting for a first publish or a retry
+    last_error        text                                  -- why the last publish failed (e.g. Redis down)
 );
-CREATE INDEX job_outbox_due_idx ON job_outbox(next_dispatch_at);
--- Existing interrupted jobs can be safely retried after old workers have been stopped.
-UPDATE jobs SET status = 'queued', stage = 'queued' WHERE status = 'running';
-INSERT INTO job_outbox(job_id) SELECT id FROM jobs WHERE status = 'queued';
+
+CREATE INDEX job_outbox_due_idx ON job_outbox (next_dispatch_at);

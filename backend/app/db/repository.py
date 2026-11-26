@@ -9,7 +9,7 @@ from psycopg.rows import DictRow
 
 from app.config import settings
 from app.db.pool import pool
-from app.services.errors import LeaseLost
+from app.errors import LeaseLost
 from app.types import JobRecord, PositionRecord, SagittalRecord, SeriesRecord
 
 JOB_COLUMNS = "id, path, batch_id, status, error, series_id, created_at, finished_at, attempt_count, stage"

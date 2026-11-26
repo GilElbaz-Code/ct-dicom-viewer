@@ -67,14 +67,16 @@ Postgres when its volume is first created.
 ## How it works
 
 `web` (nginx) serves the React app and forwards `/api` to `api` (FastAPI). Submitting a folder, or each row of a
-CSV, inserts a row in `jobs` and puts a task on a Redis queue. An RQ `worker` takes the task, reads the DICOM
+CSV, inserts a row in `jobs` and a row in `job_outbox` in one transaction. The `relay` publishes due outbox rows
+to a Redis queue (and publishes again if a message is lost). An RQ `worker` takes the task, claims the job with a
+renewable lease, reads the DICOM
 headers, checks the folder holds one series, and sorts the slices by position. It commits the header metadata
 before validating viewer geometry and reading pixels to build the sagittal plane
 (the "analysis"). The output and successful job status commit together. If analysis fails, metadata remains
 searchable and the viewer shows that analysis is unavailable; an earlier successful result is retained. A
 problem with the data fails the job at once, with the reason. Database errors, a killed job process and a dead
 worker are retried twice before the job fails with the reason. A job that already finished is skipped if it is
-delivered again ([design.md, *Jobs and failures*](docs/design.md#jobs-and-failures)). The viewer reads one DICOM
+delivered again ([design.md, *Durability and failures*](docs/design.md#durability-and-failures)). The viewer reads one DICOM
 file per axial image and windows it into a PNG on the server.
 
 The backend has three layers, and each only calls the one below it:
@@ -89,7 +91,7 @@ The backend has three layers, and each only calls the one below it:
 
 | File | What it does |
 |---|---|
-| `backend/schema.sql` | The two tables: `series` (metadata, slice positions, analysis output) and `jobs` |
+| `backend/schema.sql` | Three tables: `series` (metadata, slice positions, analysis output), `jobs` (status, attempts, lease) and `job_outbox` (dispatch) |
 | `backend/app/services/dicom.py` | Read and validate a folder's headers; HU conversion; sagittal; window/level to PNG |
 | `backend/app/services/ingest.py` | The background job: claim (skips duplicates) → path check → headers → sagittal → save |
 | `backend/app/services/jobs.py` | Submit folders or a CSV; `publish` puts a job ID on RQ (called by the relay) |
@@ -97,7 +99,6 @@ The backend has three layers, and each only calls the one below it:
 | `backend/app/db/repository.py` | All SQL |
 | `backend/app/services/viewer.py` | Closest slice to a location; axial and sagittal PNGs |
 | `backend/app/api/*.py`, `main.py` | Routes, response models, error → HTTP status |
-| `backend/app/worker.py` | The RQ worker class; interrupted attempts are recovered by the relay from their database lease |
 | `docker-compose.yml` | db, redis, api, worker, relay, web |
 | `frontend/src/api.ts` | Typed calls to the API |
 | `frontend/src/pages/Viewer.tsx`, `Jobs.tsx`, `Search.tsx` | The three screens |
@@ -136,7 +137,7 @@ uv run pytest                             # unit tests
 TEST_DATABASE_URL=postgresql://postgres:pw@localhost:5432/postgres uv run pytest   # + API tests (drops tables!)
 uv run ruff check . && uv run ruff format --check .
 uv run uvicorn app.main:app --reload      # API on :8000 (needs DATABASE_URL, REDIS_URL, DATA_DIR)
-uv run rq worker -w app.worker.Worker     # worker (Linux/macOS; RQ needs fork)
+uv run rq worker                          # worker (Linux/macOS; RQ needs fork)
 uv run python -m app.relay                # relay: without it jobs stay queued
 
 cd frontend
@@ -150,24 +151,10 @@ npm ci && npm run dev                     # UI on http://localhost:5173, forward
 | `WEB_PORT` | `8080` | Port of the web app, bound to localhost (the app has no login) |
 
 **Troubleshooting.** On Linux the containers run as uid 10001 and need read access to the data
-(`chmod -R a+rX data`). For an existing database, apply the migrations below instead of deleting its volume.
+(`chmod -R a+rX data`). `schema.sql` runs only on an empty database volume: after changing it, recreate the
+volume with `docker compose down -v` (this deletes the indexed metadata, not your DICOM files).
 Logs: `docker compose logs -f api worker relay`.
 
-
-### Updating an existing database
-
-Fresh installations use `backend/schema.sql`. Before running the updated API/workers against an existing database,
-stop those processes, back up PostgreSQL, and apply the files in `backend/migrations/` in order. `001` removes the
-sagittal output's NOT NULL constraint; `002` adds the outbox and lease columns, and requeues
-jobs left running. Neither deletes existing series or results.
-From PowerShell, using the database credentials configured in Compose:
-
-```powershell
-Get-ChildItem backend/migrations/*.sql | Sort-Object Name | ForEach-Object { Get-Content -Raw $_ | docker compose exec -T db sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' }
-```
-
-Rebuild/restart the API, workers, relay and web app together after the migrations. The series response now includes
-`analysis_available`; metadata can exist without an image. No migration is applied automatically at API startup.
 
 ### Backend conventions and supported data
 

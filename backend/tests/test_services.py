@@ -1,8 +1,8 @@
 import pytest
 
 from app.config import settings
+from app.errors import InvalidInput
 from app.services import ingest, jobs, viewer
-from app.services.errors import InvalidInput
 
 POSITIONS = [-10.0, -7.5, -5.0, -2.5, 0.0]
 

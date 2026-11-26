@@ -14,8 +14,8 @@ from psycopg_pool import PoolTimeout
 
 from app.config import settings
 from app.db import repository
+from app.errors import InvalidInput, LeaseLost
 from app.services import dicom
-from app.services.errors import InvalidInput, LeaseLost
 from app.services.lease import Lease
 
 logger = logging.getLogger(__name__)

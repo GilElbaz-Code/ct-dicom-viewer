@@ -13,7 +13,7 @@ from pydicom.dataset import Dataset
 from pydicom.errors import InvalidDicomError
 from pydicom.pixels import apply_modality_lut
 
-from app.services.errors import InvalidInput
+from app.errors import InvalidInput
 
 # A file counts as a slice only if it has the geometry the viewer needs.
 REQUIRED_TAGS = ("SeriesInstanceUID", "ImagePositionPatient", "ImageOrientationPatient", "Rows", "Columns")

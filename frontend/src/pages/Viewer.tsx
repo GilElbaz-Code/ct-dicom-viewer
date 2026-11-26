@@ -97,7 +97,7 @@ function SeriesView({ series, picker }: { series: Series; picker: ReactNode }) {
 
   const [windowing, setWindowing] = useState({ width: 400, level: 40 });
   const [shown] = useDebouncedValue(windowing, 250); // one image request after typing stops, not one per keystroke
-  const preset = PRESETS.find((p) => p.width === windowing.width && p.level === windowing.level)?.label ?? "Custom";
+  const preset = PRESETS.find((p) => p.width === windowing.width && p.level === windowing.level)?.label ?? ""; // "": typed values match no preset, so none is highlighted
 
   function show(event: SubmitEvent) {
     event.preventDefault();
@@ -156,7 +156,7 @@ function SeriesView({ series, picker }: { series: Series; picker: ReactNode }) {
               const p = PRESETS.find((x) => x.label === label);
               if (p) setWindowing({ width: p.width, level: p.level });
             }}
-            data={[...PRESETS.map((p) => p.label), { label: "Custom", value: "Custom", disabled: true }]}
+            data={PRESETS.map((p) => p.label)}
           />
           <NumberInput
             w={90}

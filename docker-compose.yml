@@ -49,7 +49,7 @@ services:
 
   worker:
     <<: *backend
-    command: ["rq", "worker", "--url", "redis://redis:6379/0", "--worker-class", "app.worker.Worker"]
+    command: ["rq", "worker", "--url", "redis://redis:6379/0"]
     deploy:
       replicas: 2  # two series are processed at the same time
 

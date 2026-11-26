@@ -5,8 +5,8 @@ from math import isfinite
 import numpy as np
 
 from app.db import repository
+from app.errors import InvalidInput, NotFound
 from app.services import dicom
-from app.services.errors import InvalidInput, NotFound
 from app.types import LocatedRecord, SeriesRecord
 
 

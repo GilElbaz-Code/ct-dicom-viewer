@@ -10,8 +10,8 @@ from rq import Queue
 
 from app.config import settings
 from app.db import repository
+from app.errors import InvalidInput
 from app.services import ingest
-from app.services.errors import InvalidInput
 from app.types import JobRecord
 
 MAX_CSV_BYTES = 1_000_000

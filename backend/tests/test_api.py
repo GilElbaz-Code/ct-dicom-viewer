@@ -16,9 +16,9 @@ from redis import ConnectionError as RedisConnectionError
 from app.config import settings
 from app.db import dispatch, repository
 from app.db.pool import pool
+from app.errors import LeaseLost
 from app.main import app
 from app.services import dicom, ingest
-from app.services.errors import LeaseLost
 
 DATABASE_URL = os.environ.get("TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(not DATABASE_URL, reason="set TEST_DATABASE_URL to a disposable PostgreSQL database")
@@ -142,18 +142,6 @@ def test_failed_reanalysis_preserves_previous_result(client, make_series, monkey
     assert client.get("/api/jobs").json()[0]["status"] == "failed"
     assert client.get(image_url).content == original
     assert client.get("/api/series").json()[0]["analysis_available"] is True
-
-
-def test_metadata_migration_preserves_existing_series(client, make_series):
-    make_series("chest")
-    submit(client, "/api/jobs", json={"path": "chest"})
-    with pool().connection() as conn:
-        conn.execute("ALTER TABLE series ALTER COLUMN sagittal SET NOT NULL")
-        migration = Path(__file__).parents[1] / "migrations/001_metadata_without_analysis.sql"
-        conn.execute(migration.read_text(encoding="utf-8"))
-    [series] = client.get("/api/series").json()
-    assert series["analysis_available"] is True
-    assert client.get(f"/api/series/{series['id']}/sagittal").status_code == 200
 
 
 def expire(job_id):

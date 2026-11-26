@@ -6,7 +6,7 @@ from types import TracebackType
 
 from app.config import settings
 from app.db import repository
-from app.services.errors import LeaseLost
+from app.errors import LeaseLost
 
 logger = logging.getLogger(__name__)
 

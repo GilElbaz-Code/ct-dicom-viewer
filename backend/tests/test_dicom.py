@@ -6,8 +6,8 @@ import pydicom
 import pytest
 from PIL import Image
 
+from app.errors import InvalidInput
 from app.services import dicom
-from app.services.errors import InvalidInput
 from tests.conftest import write_slice
 
 

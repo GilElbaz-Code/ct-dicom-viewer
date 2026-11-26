@@ -248,7 +248,7 @@ design above, not of the implementation.
 | Retries and duplicate protection | Implemented: workers claim a job with a new attempt token and a renewed lease; metadata, result and status writes check both. Retryable database errors back off up to three attempts; RQ retries are not used |
 | Results | One sagittal plane currently lives on the series row (latest success wins); job-specific result records are a target addition |
 | Viewer | z/index, axial and sagittal views, marker, metadata and adjustable 400/40 windowing exist; geometry validation rejects unsupported orientations and irregular spacing |
-| Database deliverables | `backend/schema.sql` contains the schema; `backend/migrations/` upgrades older databases; README contains the PostgreSQL rationale and million-series changes |
+| Database deliverables | `backend/schema.sql` contains the schema; README contains the PostgreSQL rationale and million-series changes |
 | Production operations | SSO, TLS, readiness checks and relay/lease/upload monitoring are design capabilities, not local-app features |
 
 The remaining gaps (browser upload, CSV row numbers, job-specific results, pagination, study-level search, operations) do not

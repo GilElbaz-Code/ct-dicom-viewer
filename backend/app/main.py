@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 
 from app.api import jobs, series
 from app.db.pool import close_pool
-from app.services.errors import InvalidInput, NotFound
+from app.errors import InvalidInput, NotFound
 
 
 @asynccontextmanager
