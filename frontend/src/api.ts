@@ -1,74 +1,113 @@
-import type { Batch, Job, LibraryDirectory, Located, Series, SeriesDetail } from "./types";
+// Typed calls to the FastAPI backend. The types mirror backend/app/api/schemas.py.
 
-export class ApiError extends Error {
-  constructor(public status: number, message: string, public code?: string) {
-    super(message);
-  }
+export type JobStatus = "queued" | "running" | "done" | "failed";
+
+export interface Job {
+  id: number;
+  path: string;
+  batch_id: string | null;
+  status: JobStatus;
+  error: string | null;
+  series_id: number | null;
+  created_at: string;
+  finished_at: string | null;
+  attempt_count: number;
+  stage: string;
 }
+
+export interface UploadFileSpec {
+  name: string;
+  size: number;
+  sha256: string;
+}
+
+export interface UploadSession {
+  id: string;
+  name: string;
+  status: "uploading" | "complete";
+  job_id: number | null;
+  expires_at: string;
+  files: (UploadFileSpec & { uploaded: boolean; form: { url: string; fields: Record<string, string> } | null })[];
+}
+
+export interface Series {
+  id: number;
+  series_uid: string;
+  study_uid: string;
+  patient_id: string | null;
+  study_description: string | null;
+  series_description: string | null;
+  modality: string | null;
+  pixel_spacing: [number, number] | null;
+  slice_thickness: number | null;
+  spacing_between_slices: number | null;
+  slice_spacing: number;
+  num_slices: number;
+  rows: number;
+  columns: number;
+  z_min: number;
+  z_max: number;
+  source_path: string;
+  updated_at: string;
+  analysis_available: boolean;
+}
+
+export interface Located {
+  index: number;
+  z: number;
+  num_slices: number;
+  distance_mm: number;
+  outside: boolean;
+}
+
+export type SliceTarget = { z: number } | { index: number };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`/api${path}`, init);
-  const text = await response.text();
-  let body;
-  try {
-    body = text ? JSON.parse(text) : null;
-  } catch {
-    throw new ApiError(response.status, response.ok ? "Invalid response from the server" : response.statusText);
-  }
+  const body = await response.json().catch(() => null);
   if (!response.ok) {
-    // FastAPI returns {detail: string} or {detail: [{msg, loc}]} for validation errors
+    // Our errors carry a string; FastAPI's request validation errors carry a list.
     const detail = body?.detail;
-    const message = Array.isArray(detail)
-      ? detail.map((d: { msg: string; loc: string[] }) => `${d.loc.at(-1)}: ${d.msg}`).join("; ")
-      : (detail ?? response.statusText);
-    throw new ApiError(response.status, message, body?.code);
+    throw new Error(Array.isArray(detail) ? detail.map((d: { msg: string }) => d.msg).join("; ") : (detail ?? response.statusText));
   }
   return body as T;
 }
 
-const json = (body: unknown): RequestInit => ({
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify(body),
-});
-
-function query(params: Record<string, string | number | boolean | undefined | null>): string {
-  const q = new URLSearchParams();
-  for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== null && v !== "") q.set(k, String(v));
-  const s = q.toString();
-  return s ? `?${s}` : "";
-}
+const query = (params: Record<string, string | number | undefined>) =>
+  new URLSearchParams(
+    Object.entries(params)
+      .filter(([, value]) => value !== undefined && value !== "")
+      .map(([key, value]) => [key, String(value)]),
+  ).toString();
 
 export const api = {
-  searchSeries: (params: Record<string, string | number | undefined>, signal?: AbortSignal) =>
-    request<{ items: Series[]; total: number }>(`/series${query({ limit: 50, ...params })}`, { signal }),
-  getSeries: (id: number, signal?: AbortSignal) => request<SeriesDetail>(`/series/${id}`, { signal }),
-  locate: (id: number, by: { z: number } | { index: number }) => request<Located>(`/series/${id}/locate${query(by)}`),
-  // `version` changes when a series is re-indexed, so the browser never shows a cached slice of the old files
-  axialUrl: (id: number, index: number, window: number, level: number, version: string) =>
-    `/api/series/${id}/axial/${index}${query({ window, level, v: version })}`,
-  sagittalUrl: (id: number, window: number, level: number, version: string) =>
-    `/api/series/${id}/sagittal${query({ window, level, v: version })}`,
-
-  listJobs: (params: Record<string, string | number | undefined>, signal?: AbortSignal) => request<Job[]>(`/jobs${query(params)}`, { signal }),
-  submitPath: (path: string) => request<Job>("/jobs", json({ path })),
-  retryJob: (id: number) => request<Job>(`/jobs/${id}/retry`, { method: "POST" }),
-
-  submitBatch: (file: File) => {
+  createUpload: (name: string, files: UploadFileSpec[]) => request<UploadSession>("/uploads", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, files }),
+  }),
+  uploadSession: (id: string) => request<UploadSession>(`/uploads/${id}`),
+  completeUpload: (id: string) => request<Job>(`/uploads/${id}/complete`, { method: "POST" }),
+  searchSeries: (filters: { max_slice_thickness?: number; description?: string }) =>
+    request<Series[]>(`/series?${query(filters)}`),
+  getSeries: (id: number) => request<Series>(`/series/${id}`),
+  locate: (id: number, target: SliceTarget) => request<Located>(`/series/${id}/locate?${query(target)}`),
+  directories: () => request<string[]>("/directories"),
+  jobs: (batchId: string | null) => request<Job[]>(`/jobs?${query({ batch_id: batchId ?? undefined })}`),
+  indexFolder: (path: string) =>
+    request<Job>("/jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    }),
+  indexCsv: (file: File) => {
     const form = new FormData();
     form.append("file", file);
-    return request<Batch>("/batches", { method: "POST", body: form });
+    return request<Job[]>("/batches", { method: "POST", body: form });
   },
-  listBatches: (beforeId: number | undefined, signal?: AbortSignal) =>
-    request<Batch[]>(`/batches${query({ before_id: beforeId, limit: 9 })}`, { signal }),
-
-  startUpload: (signal?: AbortSignal) => request<{ upload_id: string }>("/uploads", { method: "POST", signal }),
-  uploadFiles: (uploadId: string, files: File[], signal?: AbortSignal) => {
-    const form = new FormData();
-    for (const f of files) form.append("files", f, f.webkitRelativePath || f.name);
-    return request<{ saved: number }>(`/uploads/${uploadId}/files`, { method: "POST", body: form, signal });
-  },
-  completeUpload: (uploadId: string, signal?: AbortSignal) => request<Job>(`/uploads/${uploadId}/complete`, { method: "POST", signal }),
-
-  libraryDirectories: (signal?: AbortSignal) => request<LibraryDirectory[]>("/library/directories", { signal }),
 };
+
+// Images are plain <img> URLs. `v` changes when a series is re-indexed, so the browser never shows a stale cached image.
+export const axialUrl = (series: Series, index: number, width: number, level: number) =>
+  `/api/series/${series.id}/axial/${index}?${query({ window: width, level, v: series.updated_at })}`;
+
+export const sagittalUrl = (series: Series, width: number, level: number) =>
+  `/api/series/${series.id}/sagittal?${query({ window: width, level, v: series.updated_at })}`;

@@ -2,127 +2,100 @@
 
 ## How the images are built, and why
 
-**Backend** ([`backend/Dockerfile`](../backend/Dockerfile)): one image for every Python role. The command picks
-the role: API (`uvicorn`), worker (`python -m app.worker`), migrations (`python -m app.migrate`) or the demo-data
-tool. One image means one build, one scan and one version tag, and the worker can never run different code
-from the API.
-
-* **Multi-stage.** The `build` stage installs the pinned `requirements.txt` into a virtualenv; `runtime` copies
-  only that virtualenv onto a fresh `python:3.13-slim`, so pip caches and build files never reach production.
-* **Layer order for caching.** Requirements are copied and installed *before* the source code, so editing
-  Python rebuilds in seconds and only a dependency change reinstalls packages.
-* **Non-root.** The runtime runs as uid 10001. `/data/uploads` and `/data/derived` are created and owned by
-  that user in the image, so the named volumes mounted there inherit the right ownership.
-* **A `test` stage** adds pytest and ruff to the runtime image. CI lints and tests *inside the image that
-  ships*, so "works in CI" means "works in the container".
-* All Python dependencies are pinned and all have prebuilt wheels for linux/amd64 and linux/arm64 (Apple
-  Silicon), so builds need no compiler and are reproducible.
-
-**Frontend** ([`frontend/Dockerfile`](../frontend/Dockerfile)): `node:22-slim` runs `npm ci` (exact versions from
-`package-lock.json`) and `vite build`; the final image is `nginx:alpine` with only the static files and
-[`nginx.conf`](../frontend/nginx.conf). Node and `node_modules` never reach production; the image is ~50 MB.
+* **[`backend/Dockerfile`](../backend/Dockerfile)** builds one image for the API, worker, relay and `storage-init`; the compose
+  `command` picks the role, so they always run the same code and dependencies. It starts from
+  `python:3.13-slim` and copies in the `uv` binary. `uv sync --frozen` installs exactly the versions in `uv.lock`
+  (reproducible builds). `pyproject.toml` and `uv.lock` are copied before the code, so the dependency layer is
+  rebuilt only when dependencies change. The process runs as a non-root user (uid 10001).
+* **[`frontend/Dockerfile`](../frontend/Dockerfile)** has two stages: Node builds the React app into static
+  files, then only those files are copied into `nginx:alpine`. The runtime image has no Node and no source, just
+  nginx and ~1 MB of assets.
 
 ## Where the data and the database live
 
-Containers are disposable; nothing that matters is stored in a container's own filesystem.
+| What | Where | Lifetime |
+|---|---|---|
+| DICOM files | Host folder `./data` (or `DATA_DIR`), bind-mounted **read-only** at `/data` in `api` and `worker` | Yours; never modified |
+| PostgreSQL data | Named volume `pgdata` | Survives `docker compose down`; deleted by `down -v` |
+| Schema | `backend/schema.sql`, mounted into `/docker-entrypoint-initdb.d` | Applied once, when `pgdata` is empty |
+| Redis queue | Named volume `redisdata`, append-only file on | Queued tasks survive a restart |
+| Analysis output (sagittal planes) | In PostgreSQL, on the series row | Same as the database |
+| Browser uploads | MinIO (built from a pinned release in [`storage/Dockerfile`](../storage/Dockerfile)), named volume `objectdata`; bucket created by the one-shot `storage-init` | Sealed series are kept; unfinished uploads are deleted by the relay after 24 hours |
 
-| Data | Where | Mounted into | Access |
-|---|---|---|---|
-| Source DICOM library | Host folder `./data` (or `DICOM_LIBRARY_DIR`); in production the research NAS | api, worker | **read-only** |
-| Browser uploads | Named volume `uploads` | api (rw), worker (ro) | only the API writes |
-| Derived results (sagittal planes; QC numbers are in the database) | Named volume `derived` | worker (rw), api (ro) | only workers write |
-| PostgreSQL data | Named volume `pgdata` | db | only Postgres |
-
-The read-only mounts are a guarantee, not a convention: no bug in the app can modify source data. Each volume
-has a single writer. `docker compose down` keeps all volumes; `down -v` deletes them for a clean start. In
-production the database would be a managed or dedicated Postgres with backups and point-in-time recovery,
-and `derived` would be on shared storage or an object store so workers can run on several hosts.
+The `api`, `worker`, `relay` and `web` containers hold no state, so they can be rebuilt or replaced at any time. In
+production the database would be a managed PostgreSQL with backups, Redis a managed instance, and DICOM in object
+storage or a network share.
 
 ## How the services reach each other
 
-Compose puts every service on one private network and resolves **service names** through Docker's DNS: the
-API connects to `db:5432`, nginx proxies `/api/` to `api:8000`. **Only `web` publishes a port**: 8080 on the host,
-bound to `127.0.0.1` by default because the demo has no login (`WEB_BIND=0.0.0.0` opens it to the network). Postgres and the API are not reachable from outside, so the database needs no public exposure at all.
+All services share the compose network and find each other by service name:
 
-* The browser talks only to nginx (same origin for the app and `/api`, so there is no CORS to configure).
-* nginx resolves `api` per request (`resolver 127.0.0.11`), so a recreated API container with a new IP is
-  picked up without restarting nginx. It also overwrites `X-Forwarded-User`, so a browser cannot claim an
-  identity. In production the SSO check runs *in* this nginx (`auth_request` to oauth2-proxy), and the same
-  line sets the header from the verified session instead of clearing it.
-* Workers never talk to the API: they coordinate only through Postgres (job rows) and the shared volumes.
-  That is why `docker compose up --scale worker=5` just works.
-* Start order is explicit: `db` healthy → `migrate` (one-shot) completed successfully → `api` and `worker` →
-  `web` once the API is healthy. Migrations run once per deploy instead of racing inside each replica (a
-  Postgres advisory lock makes concurrent runs safe anyway).
+* The browser talks only to `web`. Its port is published on `127.0.0.1:8080`, because the app has no login.
+* `web`'s nginx sends `/api/*` to `http://api:8000` ([`nginx.conf`](../frontend/nginx.conf)), so the browser sees
+  a single origin (no CORS).
+* `api` and `worker` reach PostgreSQL at `db:5432` and Redis at `redis:6379` through `DATABASE_URL` and
+  `REDIS_URL`.
+* The browser uploads files straight to MinIO on `127.0.0.1:9000` with presigned POSTs (`S3_PUBLIC_ENDPOINT`);
+  MinIO's CORS origins come from `MINIO_API_CORS_ALLOW_ORIGIN`. The backend reaches it at `storage:9000`.
+* Start order follows the healthchecks: `db`, `redis` and `storage-init` must succeed before the backend services start, and
+  `web` waits for `api`'s `/api/health`.
 
 ## CI pipeline
 
-[`.github/workflows/ci.yml`](../.github/workflows/ci.yml), on every pull request and push to `main`:
+The repository has no pipeline, since the app is reviewed by running it locally. On GitHub Actions (or GitLab
+CI) I would run these on every pull request:
 
-1. **backend**: build the image's `test` stage (layer cache in GitHub Actions), run `ruff` and `pytest`
-   inside it against a Postgres service container. The integration tests create a throw-away database per test,
-   run the real migrations, and drive the API, the queue and the worker together.
-2. **frontend**: `npm ci`, `npm run build` (type-checks with `tsc` and bundles) and `npm test` (Vitest in
-   jsdom).
-3. **e2e** (after both pass): `docker compose up --build` on a clean runner, the same way a reviewer would,
-   generate a synthetic series, and run [`scripts/smoke_test.sh`](../scripts/smoke_test.sh): index, wait
-   for analysis, fetch axial and sagittal PNGs, submit a batch with a bad row, run a metadata query. On failure
-   it prints the container logs.
-4. **publish** (`main` only): push `backend` and `web` images to GitHub Container Registry, tagged with the
-   commit SHA (immutable, used for deploys and rollbacks) and `latest`.
+1. **backend:** `uv sync --frozen`, `ruff check`, `ruff format --check`, then `pytest` with a PostgreSQL
+   service container and `TEST_DATABASE_URL` set, so the API tests run as well as the unit tests (which use
+   small synthetic DICOM series written with pydicom).
+2. **frontend:** `npm ci` and `npm run build`, which type-checks before bundling.
+3. **images:** `docker compose build`, so a broken Dockerfile fails the pull request.
 
-### What the tests cover, and what they do not
+On `main`, CD pushes both images to a registry tagged with the commit SHA and deploys that tag to staging
+(`helm upgrade --install`). It runs a smoke test there (index a synthetic series, fetch both images), then promotes
+the same tag to production. Dependabot or Renovate keeps dependencies current, and Trivy scans the images.
 
-| Suite | Count | Runs | Validates |
-|---|---|---|---|
-| Frontend unit and component tests | 23 | Vitest + jsdom, API mocked | Local slice lookup (closest z, ties, out of range, invalid input); polling never overlaps and aborts on change or unmount; upload retries with the same session, aborts the other parts on a permanent failure and clears progress; parts are capped by bytes and file count; a late response for an old series cannot replace the new one; jobs and series pages reach older rows |
-| Backend unit tests | 53 | pytest, no database | DICOM header validation (several series, duplicate or drifting positions, non-axial, invalid or inconsistent `PixelSpacing`), slice sorting, HU and window/level, sagittal geometry, path containment, CSV parsing, configuration |
-| Backend integration tests | 29 | pytest against real PostgreSQL, a fresh migrated database per test | Ingest → analyze chain through the API, queue and worker; `SKIP LOCKED` passing over a row another transaction holds; completion waiting for a part that holds its lock; retries with backoff; expired leases and stale workers (a stale analysis cannot replace published pixels); superseded derived files removed; upload idempotency (repeated parts, conflicting content, repeated or concurrent completion, empty upload), total size cap, abandoned-upload cleanup, adoption of pre-002 uploads; cross-study queries; offset and keyset pagination; image endpoints release their connection; readiness returns `503` when the database is down; internal columns never reach the API |
+## Deploying on Kubernetes or OpenShift
 
-Without `TEST_DATABASE_URL` the 29 integration tests are skipped, not failed. The two lock tests hold the lock
-in a second connection; each fails if its lock (`SKIP LOCKED`, or `FOR UPDATE` on completion) is removed.
+The compose services map one to one onto a Helm chart, with values per environment (image tag, replicas, hosts):
 
-Not covered by automated tests:
-
-* **Real browser and Docker end to end.** Component tests run in jsdom with a mocked API. The CI `e2e` job is
-  a curl-level smoke test of the compose stack, not a browser test.
-* **Production throughput.** Nothing measures jobs per minute, API latency under load, or pool exhaustion.
-* **Real NAS or network storage.** Tests use the local disk; NFS latency, hard-link support and partial
-  outages are not exercised.
-
-Deploying would be one more job: on a tag, update the image tags in the target environment and run
-`migrate` before the new API and worker replicas start. Rollback = redeploy the previous SHA; migrations are
-written to be backward-compatible (add columns first, remove them a release later).
+* `api`, `worker`, `relay` and `web` become Deployments of the same images (one `relay` replica is enough; extra ones are safe). An Ingress (a Route on OpenShift) exposes
+  `web` and terminates TLS. Workers can scale on queue length (KEDA reading the Redis list).
+* Probes: liveness is `/api/health` for `api` and `/` for `web`. Readiness for `api` needs a separate endpoint
+  that also runs `SELECT 1` and a Redis `PING`, because `/api/health` never touches either. Workers renew database leases; the relay recovers jobs whose lease expires.
+* PostgreSQL is a managed database or an operator (CloudNativePG), not a hand-written StatefulSet. The schema
+  runs as a Job before each release, instead of from initdb.
+* Redis is managed, or a StatefulSet with a PersistentVolumeClaim.
+* DICOM data comes from a ReadOnlyMany volume (NFS or CephFS) mounted at `/data` in `api` and `worker`.
+* Settings live in a ConfigMap. Passwords live in Secrets, synced from Vault by the External Secrets Operator.
+  Keycloak login is handled by oauth2-proxy in front of `web`.
+* OpenShift runs containers under a random user ID. The backend image already runs as non-root and writes
+  nothing to disk, so it works unchanged. The web image would switch to `nginxinc/nginx-unprivileged`, because
+  stock nginx needs root to write its cache and PID file.
 
 ## Secrets
 
-* **Nothing secret is in the repository or the images.** Compose reads `POSTGRES_PASSWORD` from the
-  environment or an untracked `.env` (`.env.example` documents the variables; `.gitignore` excludes `.env`).
-  The default (`ctviewer-dev-only`) exists so a reviewer can run the stack with zero setup, and is only valid
-  on the private compose network.
-* **In production** the password comes from the platform's secret store (Docker/Kubernetes secrets, Vault,
-  AWS Secrets Manager) mounted as a file. The app already supports this: `POSTGRES_PASSWORD_FILE`
-  ([`backend/app/config.py`](../backend/app/config.py)), the same convention the official Postgres image uses.
-* **In CI** the registry login uses the per-run `GITHUB_TOKEN`, which expires with the job, so no long-lived
-  credential is stored. The test database password is a throw-away value that exists only inside the runner.
-* Rotate in two steps, because `POSTGRES_PASSWORD` is only read when the database volume is first created:
-  `ALTER ROLE ctviewer PASSWORD '…'` in Postgres, then update the secret and restart `api` and `worker`.
-  No image rebuild is needed. The app builds its connection string with psycopg's `make_conninfo`, so any
-  characters are safe in the password.
+* Locally, the secrets are `POSTGRES_PASSWORD` and the MinIO credentials `S3_ACCESS_KEY` / `S3_SECRET_KEY`.
+  They go in `.env`, which is git-ignored; `.env.example` documents them. Compose has development defaults so a
+  clean checkout starts with no setup. Locally the backend uses MinIO's root user. In production it would get its
+  own access key, limited to the `ct-studies` bucket.
+* Images contain no secrets: everything comes from the environment at run time.
+* In CI they would be the CI system's encrypted secrets. Deploying to a cloud would use OIDC federation instead of
+  long-lived keys.
+* In production, secrets come from a secret manager (AWS Secrets Manager, Vault, or Kubernetes Secrets) as
+  environment variables or mounted files, and are rotated there.
 
 ## Knowing the service is healthy in production
 
-| Signal | Source | Alert when |
-|---|---|---|
-| API process alive | `GET /api/health`, Docker healthcheck in compose | container unhealthy → restart (orchestrator) |
-| API can serve | `GET /api/ready` checks the database and the mounted volumes; 503 otherwise | load balancer removes the replica; page if all fail |
-| Workers alive | each worker touches a heartbeat file every loop; compose healthcheck fails if it is older than 60 s | worker unhealthy for > 2 min |
-| Queue is moving | `GET /api/stats` → `oldest_queued_seconds` | oldest runnable job older than ~10 min: workers down or saturated |
-| Jobs are healthy | `/api/stats` → `failed_last_hour`, `expired_leases` | failure rate spike (bad data or a broken dependency); expired leases mean workers are crashing |
-| Errors in context | JSON logs on stdout (job id, worker id, error code), collected by Loki/ELK | error-level log rate |
-| Capacity | container CPU/memory (cAdvisor), Postgres connections and disk, volume free space | disk > 80%, memory near the limit (1 GB series) |
-
-In a full deployment `/api/stats` would be exposed as Prometheus metrics (`/metrics`) and scraped, with the
-alerts above in Alertmanager and a dashboard of queue depth, job duration percentiles and failures by
-`error_code`. A synthetic check (the smoke test against a known small series, every few minutes) catches
-failures that no single component reports.
+* **Liveness:** `GET /api/health` (the compose healthcheck) and nginx answering on `/`. An external uptime check
+  hits the public URL. `/api/health` only shows the process is up and never touches PostgreSQL or Redis. A
+  readiness check would also run `SELECT 1` and a Redis `PING`.
+* **Work is flowing.** The real signal for this service:
+  * Queue depth and the age of the oldest queued task (`rq info`, or Redis metrics).
+  * Jobs by status, and the failure ratio over the last hour (`SELECT status, count(*) FROM jobs ...`).
+  * Job duration. Alert when the oldest queued job is older than a few minutes, or when failures jump.
+* **API:** request rate, p95 latency and 5xx rate per route, from nginx or uvicorn logs into
+  Prometheus/Grafana or the cloud provider's monitoring.
+* **Resources:** PostgreSQL connections, disk and replication lag; worker memory; disk free on DICOM storage.
+* **Logs:** all containers log to stdout (`docker compose logs api worker`); in production they are shipped to a
+  central store, with the job id in worker log lines.

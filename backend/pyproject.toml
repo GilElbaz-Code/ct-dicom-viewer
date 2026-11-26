@@ -1,20 +1,43 @@
 [project]
-name = "ct-dicom-viewer-backend"
+name = "ct-viewer"
 version = "1.0.0"
-requires-python = ">=3.12"
+description = "CT DICOM viewer: FastAPI API and RQ worker"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "python-multipart",          # CSV upload (FastAPI File/UploadFile)
+    "psycopg[binary,pool]",
+    "pydantic-settings",
+    "pydicom",
+    "pylibjpeg",                 # decoders for compressed DICOM (JPEG, JPEG 2000)
+    "pylibjpeg-libjpeg",
+    "pylibjpeg-openjpeg",
+    "numpy",
+    "pillow",
+    "rq",
+    "boto3",
+]
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.16.2",
+    "pytest",
+    "ruff",
+]
+
+[tool.uv]
+package = false  # an application, not a library: uv only installs the dependencies
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-q"
 
 [tool.ruff]
 line-length = 120
-target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP", "SIM", "BLE"]
-ignore = ["B008"]
+select = ["E", "F", "I", "B", "UP", "SIM", "ANN"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["BLE"]
+"tests/**" = ["ANN"]

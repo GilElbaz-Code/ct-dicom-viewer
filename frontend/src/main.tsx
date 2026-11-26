@@ -1,15 +1,31 @@
+import "@fontsource/ibm-plex-sans/400.css";
+import "@fontsource/ibm-plex-sans/500.css";
+import "@fontsource/ibm-plex-sans/600.css";
+import "@mantine/core/styles.css";
+import "./styles.css";
+
+import { MantineProvider, createTheme } from "@mantine/core";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
-// Self-hosted (bundled) so the app makes no third-party requests; latin subset only.
-import "@fontsource/ibm-plex-sans/latin-400.css";
-import "@fontsource/ibm-plex-sans/latin-500.css";
-import "@fontsource/ibm-plex-sans/latin-600.css";
-import "@fontsource/ibm-plex-mono/latin-400.css";
-import "./styles.css";
+
+const theme = createTheme({
+  fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+  headings: { fontFamily: "'IBM Plex Sans', system-ui, sans-serif", fontWeight: "600" },
+  primaryColor: "cyan",
+  defaultRadius: "sm",
+});
+
+// Errors are shown to the user right away; retrying a 404 or 422 three times would only delay the message.
+const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <App />
+    <MantineProvider theme={theme} defaultColorScheme="dark">
+      <QueryClientProvider client={queryClient}>
+        <App />
+      </QueryClientProvider>
+    </MantineProvider>
   </StrictMode>,
 );

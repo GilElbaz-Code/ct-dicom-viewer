@@ -1,69 +1,57 @@
-import { useEffect, useState } from "react";
-import { ImportPanel } from "./components/ImportPanel";
-import { SeriesBrowser } from "./components/SeriesBrowser";
-import { Viewer } from "./components/Viewer";
+import { AppShell, Group, SegmentedControl, Title } from "@mantine/core";
+import { useLocalStorage } from "@mantine/hooks";
+import { Jobs } from "./pages/Jobs";
+import { Search } from "./pages/Search";
+import { Viewer } from "./pages/Viewer";
 
-type Tab = "viewer" | "series" | "import";
-const TABS: [Tab, string][] = [
-  ["viewer", "Viewer"],
-  ["series", "Series"],
-  ["import", "Import & jobs"],
-];
+type Tab = "viewer" | "search" | "jobs";
 
-/** State lives in the URL hash (#viewer?series=3), so links and reloads land on the same view. */
-function readHash(): { tab: Tab; seriesId: number | null } {
-  const [name, qs] = window.location.hash.replace(/^#/, "").split("?");
-  const tab = (TABS.find(([t]) => t === name)?.[0] ?? "viewer") as Tab;
-  const id = new URLSearchParams(qs).get("series");
-  return { tab, seriesId: id ? Number(id) : null };
+/** Gantry ring with the amber slice line: the same amber marks the slice location in the viewer. */
+function Logo() {
+  return (
+    <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true">
+      <circle cx="12" cy="12" r="9" fill="none" stroke="var(--mantine-color-cyan-4)" strokeWidth="2" />
+      <line x1="1" y1="12" x2="23" y2="12" stroke="var(--mantine-color-yellow-5)" strokeWidth="1.5" />
+    </svg>
+  );
 }
 
 export function App() {
-  const [{ tab, seriesId }, setRoute] = useState(readHash);
+  // Kept in localStorage, so a reload or a later visit opens the same tab and series.
+  const [tab, setTab] = useLocalStorage<Tab>({ key: "ct-viewer-tab", defaultValue: "viewer" });
+  const [seriesId, setSeriesId] = useLocalStorage<number | null>({ key: "ct-viewer-series", defaultValue: null });
 
-  useEffect(() => {
-    const onHash = () => setRoute(readHash());
-    window.addEventListener("hashchange", onHash);
-    return () => window.removeEventListener("hashchange", onHash);
-  }, []);
-
-  const go = (next: Tab, id: number | null = seriesId) => {
-    window.location.hash = id !== null && next === "viewer" ? `${next}?series=${id}` : next;
+  const openSeries = (id: number) => {
+    setSeriesId(id);
+    setTab("viewer");
   };
-  const openSeries = (id: number) => go("viewer", id);
 
   return (
-    <div className="app">
-      <header>
-        <div className="brand">
-          {/* gantry ring with an axial plane through it */}
-          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
-            <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeWidth="2" />
-            <circle cx="12" cy="12" r="4.5" fill="none" stroke="currentColor" strokeWidth="1.5" opacity="0.55" />
-            <line x1="1.5" y1="12" x2="22.5" y2="12" stroke="var(--line)" strokeWidth="1.5" />
-          </svg>
-          <h1>CT DICOM Viewer</h1>
-        </div>
-        <nav>
-          {TABS.map(([t, label]) => (
-            <button
-              key={t}
-              className={t === tab ? "tab on" : "tab"}
-              aria-current={t === tab ? "page" : undefined}
-              onClick={() => go(t)}
-            >
-              {label}
-            </button>
-          ))}
-        </nav>
-      </header>
-      <main>
-        {tab === "viewer" && (
-          <Viewer seriesId={seriesId} onSelectSeries={openSeries} />
-        )}
-        {tab === "series" && <SeriesBrowser onOpen={openSeries} />}
-        {tab === "import" && <ImportPanel onOpenSeries={openSeries} />}
-      </main>
-    </div>
+    <AppShell header={{ height: 60 }} padding="lg">
+      <AppShell.Header px="lg">
+        <Group h="100%" justify="space-between">
+          <Group gap="sm">
+            <Logo />
+            <Title order={1} fz="lg">
+              CT Viewer
+            </Title>
+          </Group>
+          <SegmentedControl
+            value={tab}
+            onChange={(value) => setTab(value as Tab)}
+            data={[
+              { value: "viewer", label: "Viewer" },
+              { value: "search", label: "Search" },
+              { value: "jobs", label: "Jobs" },
+            ]}
+          />
+        </Group>
+      </AppShell.Header>
+      <AppShell.Main>
+        {tab === "viewer" && <Viewer seriesId={seriesId} onSelect={setSeriesId} onGoToJobs={() => setTab("jobs")} />}
+        {tab === "search" && <Search onOpen={openSeries} />}
+        {tab === "jobs" && <Jobs onOpen={openSeries} />}
+      </AppShell.Main>
+    </AppShell>
   );
 }

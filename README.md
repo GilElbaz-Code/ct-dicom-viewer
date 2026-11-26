@@ -2,139 +2,107 @@
 
 Home assignment for the Python Backend Engineer position, Samueli Integrative Cancer Pioneering Institute.
 
-A small CT processing service: index DICOM series (by choosing a directory, uploading a folder or submitting a
-CSV batch), track the jobs, query the metadata across studies, and view any series as an axial slice at a
-chosen location plus a sagittal view with that location marked.
+Index CT DICOM series (one folder at a time or a CSV batch), follow the jobs, query the metadata across studies,
+and view any series as an axial slice at a chosen location next to a sagittal view with that location marked.
 
 | Part | Where |
 |---|---|
 | 1. System design | [`docs/design.md`](docs/design.md) |
-| 2. Implementation | `backend/` (FastAPI, worker, migrations), `frontend/` (React + TypeScript), `docker-compose.yml` |
+| 2. Implementation | [`backend/`](backend) (FastAPI, RQ worker, `schema.sql`), [`frontend/`](frontend) (React + Mantine), [`docker-compose.yml`](docker-compose.yml) |
 | 3. Docker and DevOps | [`docs/devops.md`](docs/devops.md) |
 
-![Viewer: axial slice at z = 98.75 mm, sagittal view with the location marked, series metadata](docs/images/viewer.png)
-
-<details>
-<summary>Import &amp; jobs: batch rows, failures with their reason, retry</summary>
-
-![Import and jobs](docs/images/import.png)
-
-</details>
-
-*Screenshots use the synthetic phantom from `demo-data` (the sphere on the midline appears round in the
-sagittal view only if the aspect ratio is right).*
+![Viewer: axial slice, sagittal view with the slice marked, series details](docs/images/viewer.png)
 
 ## Run it from scratch
 
-Requirements: Docker with Compose v2 (Docker Desktop, or Docker Engine 24+). Nothing else.
+Needs only Docker with Compose v2 (Docker Desktop, or Docker Engine 24+).
 
-```bash
-git clone <this repository> ct-dicom-viewer
-cd ct-dicom-viewer
-```
+1. Clone the repository. Download the two sample series (the assignment's shared Google Drive folder,
+   "Sample DICOM series for the exam") and extract them into `data/` so that each series is its own top-level
+   folder:
 
-**1. Put the DICOM data in `data/`.** Download the two sample series from the shared Google Drive folder and
-extract them so each series is its own folder:
+   ```
+   data/
+   ├── 0x23D38C868F3ED85E20/   *.dcm
+   └── 0xE13CE7B52F313D3C82/   *.dcm
+   ```
 
-```
-data/
-├── 0x23D38C868F3ED85E20/   *.dcm
-└── 0xE13CE7B52F313D3C82/   *.dcm
-```
+   A folder holding both series fails with "Expected one series per directory, found 2"; index each series
+   folder instead.
 
-No sample data at hand? Generate a synthetic CT phantom instead (or as well):
+2. Start everything:
 
-```bash
-docker compose --profile tools run --rm demo-data      # writes data/synthetic_chest/
-```
+   ```bash
+   docker compose up --build -d
+   ```
 
-**2. Start the stack.**
+3. Open **http://localhost:8080**. On **Jobs**, click **Index** next to each folder, upload a folder from your
+   computer, or upload
+   [`examples/sample_batch.csv`](examples/sample_batch.csv). Each series takes a few seconds.
+   [`examples/batch_with_errors.csv`](examples/batch_with_errors.csv) shows how failed rows are reported.
+4. On **Viewer**, pick a series and enter a location in mm or a slice index. Change the window with the presets
+   or the width/level fields (default soft tissue, 400/40). **Search** runs queries across studies.
 
-```bash
-docker compose up --build -d
-```
-
-The first build takes a few minutes. Then open **http://localhost:8080**. (Port taken? `WEB_PORT=8090 docker compose up -d`.)
-
-**3. Index the series.** In **Import & jobs**, click **Index** next to each directory, or submit
-[`examples/sample_batch.csv`](examples/sample_batch.csv) under *Batch from CSV*. Each series is indexed in
-seconds and analyzed shortly after; the jobs table updates by itself.
-
-**4. View.** In **Viewer**, pick a series, enter a location in mm (or switch to slice index) and press
-**Show**. Change the window/level with the presets or the width/level fields (default soft tissue 400/40).
-
-To check everything at once from the command line (needs `curl` and `python3`): `scripts/smoke_test.sh synthetic_chest` (after the
-demo-data step). Stop with `docker compose down`; add `-v` to also delete the database and derived data.
-
-## What the app does
-
-* **Viewer**: the axial slice closest to the requested z (`ImagePositionPatient[2]`, in mm) or at a slice index;
-  a sagittal image through the middle of the volume, in true physical proportions, with a line at the chosen
-  location; the series metadata table; window/level presets and manual values; a slider to scroll slices.
-* **Series**: queries across all indexed studies, e.g. slice thickness under 1.5 mm, or a study description.
-* **Import & jobs**: index a server directory, upload a folder from your computer, or submit a CSV; every job
-  (and every CSV row) shows its status, attempts, duration and, when it fails, the reason, with a Retry button.
-  Jobs are stored in the database, so you can close the browser and come back later.
-
-Some behaviour worth knowing:
-
-* Slice index 0 is the **most inferior** slice (lowest z); slices are always sorted by position, never by
-  file name or instance number.
-* A location outside the scanned range shows the nearest slice and says it is outside.
-* *Spacing between slices* shows the DICOM tag when present; otherwise the median distance between slice
-  positions, marked *computed* (many CT series do not write the tag). When the tag disagrees with the positions
-  (the sample PET/CT series says 3.27 mm, its slices are 2.5 mm apart) both are shown; geometry always uses
-  the positions.
-* Directories with several series, no DICOM images, duplicate slice positions or non-axial images fail with a
-  specific reason. Gaps between slices produce a warning and are interpolated in the sagittal view.
-
-### CSV format
-
-One DICOM directory per row. Paths are relative to `data/` (or absolute inside the container, e.g.
-`/data/library/…`). A header row is optional; with several columns, name the path column `path`.
-
-```csv
-path
-0x23D38C868F3ED85E20
-0xE13CE7B52F313D3C82
-```
-
-[`examples/batch_with_errors.csv`](examples/batch_with_errors.csv) shows how bad rows are reported.
+Stop with `docker compose down`. Add `-v` to also delete the database.
 
 ## Why PostgreSQL
 
-Schema: [`backend/migrations/`](backend/migrations/) (`001_initial.sql`, `002_upload_sessions.sql`), applied in
-order by the `migrate` service (`python -m app.migrate`) before the API and worker start.
+Several processes write at the same time (the API creates jobs, every worker saves results), while researchers
+query. PostgreSQL handles concurrent writers natively; SQLite serializes all writes and DuckDB allows one writing
+process. It also gives arrays (slice positions), `bytea` (the analysis output) and transactions that save a
+series and mark its job done together. The schema is [`backend/schema.sql`](backend/schema.sql), loaded by
+Postgres when its volume is first created.
 
-The metadata is written by several processes at once (the API and every worker) and queried by researchers at
-the same time. PostgreSQL handles concurrent writers natively, while SQLite serializes all writes and DuckDB
-allows a single writing process. PostgreSQL also serves as the **job queue** (`FOR UPDATE SKIP LOCKED`), so a
-job's result and its status commit in one transaction and the stack needs no Redis or RabbitMQ. JSONB with a
-GIN index keeps the long tail of DICOM header fields queryable without migrations, and `pg_trgm` makes
-"description contains" searches fast. It runs as a container here and as a managed service in production.
-DuckDB would be my choice for large analytical exports, not as the system of record.
+**At a million series**, the `series` table itself is small for PostgreSQL. What I would change:
 
-**At a million series:** the `series` table itself (about a million rows) is small for PostgreSQL; the pressure
-is elsewhere.
+* Move the sagittal images (~350 KB each, ~350 GB in total) out of the database into object storage (S3/MinIO),
+  keeping only the key in the row.
+* Add a `pg_trgm` GIN index for "description contains" searches, which today scan the table. Add keyset
+  pagination, since the API returns at most 500 rows. Elasticsearch/OpenSearch only if search grows into free
+  text or facets over many header fields.
+* Split studies into their own table and keep extra header fields in an indexed JSONB column, so new query fields
+  need no migration. Adopt a migration tool (Alembic or plain numbered SQL files) instead of a single init script.
+* Partition or archive the `jobs` table by month; put PgBouncer in front and a read replica behind the search page.
+* For population-level analytics, export to Parquet nightly and query it with DuckDB.
 
-* `instances` (one row per slice) would reach ~500 million rows. I would move the per-slice list out of the
-  database into a per-series manifest file next to the derived data (it is only ever read whole), or hash-partition
-  the table by `series_id`.
-* The search page: keyset pagination instead of `OFFSET`, estimated rather than exact counts, and composite or
-  partial indexes chosen from the real query log.
-* `jobs` grows forever: partition it by month and archive finished jobs, keeping the hot queue small. At high
-  job rates, move the queue to a broker (RabbitMQ/SQS) and keep job history in Postgres.
-* Read replicas for researcher queries, PgBouncer in front as API and worker replicas multiply.
-* Population-level analytics over all headers: a nightly export to Parquet, queried with DuckDB.
+## How it works
 
-## Architecture in one paragraph
+`web` (nginx) serves the React app and forwards `/api` to `api` (FastAPI). Submitting a folder, or each row of a
+CSV, inserts a row in `jobs` and puts a task on a Redis queue. An RQ `worker` takes the task, reads the DICOM
+headers, checks the folder holds one series, and sorts the slices by position. It commits the header metadata
+before validating viewer geometry and reading pixels to build the sagittal plane
+(the "analysis"). The output and successful job status commit together. If analysis fails, metadata remains
+searchable and the viewer shows that analysis is unavailable; an earlier successful result is retained. A
+problem with the data fails the job at once, with the reason. Database errors, a killed job process and a dead
+worker are retried twice before the job fails with the reason. A job that already finished is skipped if it is
+delivered again ([design.md, *Jobs and failures*](docs/design.md#jobs-and-failures)). The viewer reads one DICOM
+file per axial image and windows it into a PNG on the server.
 
-nginx serves the React app and proxies `/api` to FastAPI. Every submission (directory, upload, CSV row) creates an
-`ingest` job in PostgreSQL. Workers claim jobs with `SKIP LOCKED` and a lease. Ingest reads headers only,
-validates that the directory is one axial series, sorts slices by position and stores the metadata, then queues
-an `analyze` job. Analysis streams the pixel data once to build the sagittal plane and QC numbers. The viewer reads
-one DICOM file per axial request and windows it server-side into a PNG. Details, diagrams and trade-offs are in
-[`docs/design.md`](docs/design.md).
+The backend has three layers, and each only calls the one below it:
+
+| Layer | Folder | Rule |
+|---|---|---|
+| API | `backend/app/api/` | HTTP only: validate input, call one service, return a model or a PNG |
+| Logic | `backend/app/services/` | What the app does; no FastAPI, no SQL |
+| Data | `backend/app/db/` | Every SQL statement; each function is one transaction |
+
+### Code reading order
+
+| File | What it does |
+|---|---|
+| `backend/schema.sql` | The two tables: `series` (metadata, slice positions, analysis output) and `jobs` |
+| `backend/app/services/dicom.py` | Read and validate a folder's headers; HU conversion; sagittal; window/level to PNG |
+| `backend/app/services/ingest.py` | The background job: claim (skips duplicates) → path check → headers → sagittal → save |
+| `backend/app/services/jobs.py` | Submit folders or a CSV; `publish` puts a job ID on RQ (called by the relay) |
+| `backend/app/services/uploads.py`, `storage.py` | Upload sessions, presigned POSTs, checksum verification and sealing in MinIO |
+| `backend/app/relay.py`, `db/dispatch.py` | Outbox relay: publish committed jobs, recover expired leases, clean up expired uploads |
+| `backend/app/db/repository.py` | All SQL |
+| `backend/app/services/viewer.py` | Closest slice to a location; axial and sagittal PNGs |
+| `backend/app/api/*.py`, `main.py` | Routes, response models, error → HTTP status |
+| `backend/app/worker.py` | The RQ worker class; interrupted attempts are recovered by the relay from their database lease |
+| `docker-compose.yml` | db, redis, storage (MinIO), api, worker, relay, web |
+| `frontend/src/api.ts` | Typed calls to the API |
+| `frontend/src/pages/Viewer.tsx`, `Jobs.tsx`, `Search.tsx` | The three screens |
 
 ## API
 
@@ -142,83 +110,82 @@ Interactive documentation: **http://localhost:8080/api/docs**.
 
 | Method and path | Purpose |
 |---|---|
-| `POST /api/jobs` `{"path": "…"}` | Index one directory (interactive) |
-| `POST /api/batches` (CSV upload) | One ingest job per CSV row |
-| `POST /api/uploads` → `…/files` → `…/complete` | Upload a folder from the browser, then index it (parts and completion are safe to retry) |
-| `GET /api/jobs?status=&batch_id=&limit=&before_id=`, `GET /api/jobs/{id}`, `POST /api/jobs/{id}/retry` | Job status, reasons, retry |
-| `GET /api/batches?limit=&before_id=`, `GET /api/batches/{id}` | Per-batch ready / failed / pending rows |
-| `GET /api/series?max_slice_thickness=1.5&study_description=…&q=…` | Cross-study metadata queries |
-| `GET /api/series/{id}` | Metadata, analysis status, QC and every slice's z position (the viewer finds slices locally) |
-| `GET /api/series/{id}/locate?z=…` or `?index=…` | Closest slice to a location |
+| `GET /api/directories` | Folders in the data directory |
+| `POST /api/jobs` `{"path": "…"}` | Index one folder |
+| `POST /api/batches` (CSV upload) | Index every folder listed in a CSV; one job per row |
+| `POST /api/uploads` → presigned POSTs → `POST /api/uploads/{id}/complete` | Upload a folder from the browser, verify it, then index it (completion is safe to retry) |
+| `GET /api/uploads/{id}` | Which files are already uploaded, for resuming |
+| `GET /api/jobs?batch_id=` | Jobs, newest first, with the reason for each failure |
+| `GET /api/series?max_slice_thickness=1.5&description=chest` | Query across studies |
+| `GET /api/series/{id}` | Series metadata |
+| `GET /api/series/{id}/locate?z=…` or `?index=…` | Closest slice to a location in mm, or the slice at an index |
 | `GET /api/series/{id}/axial/{index}?window=400&level=40` | Axial slice as PNG |
 | `GET /api/series/{id}/sagittal?window=400&level=40` | Mid-volume sagittal as PNG |
-| `GET /api/library/directories` | Directories under `data/` |
-| `GET /api/health`, `/api/ready`, `/api/stats` | Liveness, readiness, queue metrics |
+| `GET /api/health` | Liveness |
+
+Slice index 0 is the most inferior slice (lowest z). Slices are always ordered by `ImagePositionPatient` z,
+never by file name. A location outside the scan shows the nearest slice and says so. *Spacing between slices*
+shows the header tag next to the spacing measured from the positions. Many series leave the tag out, and the
+PET/CT sample writes 3.27 mm while its slices are 2.5 mm apart.
+
+**CSV format:** one folder per row in the first column, relative to `data/`; a first row reading `path` is
+skipped.
 
 ## Development
 
-Backend tests (unit tests need nothing; integration tests need a PostgreSQL where the user can create databases):
-
 ```bash
 cd backend
-python -m venv .venv && . .venv/bin/activate && pip install -r requirements-dev.txt
-pytest                                                             # unit tests
-TEST_DATABASE_URL=postgresql://user:pass@localhost:5432/postgres pytest  # + integration
-ruff check . && ruff format --check .
+uv sync                                   # Python 3.13+ and dependencies into .venv
+uv run pytest                             # unit tests
+TEST_DATABASE_URL=postgresql://postgres:pw@localhost:5432/postgres uv run pytest   # + API tests (drops tables!)
+uv run ruff check . && uv run ruff format --check .
+uv run uvicorn app.main:app --reload      # API on :8000 (needs DATABASE_URL, REDIS_URL, DATA_DIR)
+uv run rq worker -w app.worker.Worker     # worker (Linux/macOS; RQ needs fork)
+uv run python -m app.relay                # relay: without it jobs stay queued
+uv run python -m app.services.storage     # once: create the upload bucket (uploads need the S3_* variables)
+
+cd frontend
+npm ci && npm run dev                     # UI on http://localhost:5173, forwards /api to :8000
 ```
-
-Frontend tests (Vitest, mocked API) and hot reload against an API on port 8000:
-
-```bash
-cd frontend && npm ci && npm test && npm run build
-npm run dev                               # http://localhost:5173, proxies /api to localhost:8000
-```
-
-What the suites cover (23 frontend, 53 backend unit, 29 PostgreSQL integration tests) and what they do not
-(real browser, production throughput, network storage) is listed in
-[`docs/devops.md`](docs/devops.md#what-the-tests-cover-and-what-they-do-not).
-
-Run the API and a worker outside Docker with `uvicorn app.main:app --reload` and `python -m app.worker`,
-setting `DATABASE_URL`, `LIBRARY_ROOT`, `UPLOAD_ROOT` and `DERIVED_ROOT`.
-
-### Configuration
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `DICOM_LIBRARY_DIR` | `./data` | Host folder mounted read-only as the DICOM library |
-| `WEB_PORT` | `8080` | Host port of the web app |
-| `WEB_BIND` | `127.0.0.1` | Interface it listens on; `0.0.0.0` opens it to your network (the demo has no login) |
-| `POSTGRES_PASSWORD` | `ctviewer-dev-only` | Database password (set it in `.env` before the first start; it is applied only when the database volume is created) |
-| `WORKER_REPLICAS` | `2` | Number of worker containers |
-| `JOB_MAX_ATTEMPTS` | `3` | Attempts for retryable errors |
-| `MAX_UPLOAD_FILE_MB` / `MAX_UPLOAD_TOTAL_MB` | `50` / `2048` | Largest uploaded file / whole browser upload |
-| `JOB_LEASE_SECONDS` | `120` | Lease before a silent worker's job is reclaimed |
-| `WORKER_KINDS` | `ingest,analyze` | Job kinds a worker takes (separate pools per kind) |
+| `DATA_DIR` | `./data` | Host folder with the DICOM series, mounted read-only at `/data` |
+| `POSTGRES_PASSWORD` | `ctviewer` | Set it in `.env` before the first start (see `.env.example`) |
+| `WEB_PORT` | `8080` | Port of the web app, bound to localhost (the app has no login) |
+| `STORAGE_PORT`, `S3_PUBLIC_ENDPOINT` | `9000`, `http://localhost:9000` | MinIO port and the address the browser uploads to |
+| `S3_ACCESS_KEY`, `S3_SECRET_KEY` | `ctviewer`, `ctviewer-local-storage` | MinIO credentials; set the secret in `.env` |
 
-### Layout
+**Troubleshooting.** On Linux the containers run as uid 10001 and need read access to the data
+(`chmod -R a+rX data`). For an existing database, apply the migrations below instead of deleting its volume.
+Logs: `docker compose logs -f api worker relay`.
 
-```
-backend/
-  app/
-    api/            HTTP routes: jobs, batches, uploads, series, health
-    dicom/          header reading and validation, HU/windowing, sagittal, analysis
-    jobs/           queue (SQL), handlers (ingest, analyze), batches
-    worker.py       job worker
-    migrate.py      SQL migration runner
-    tools/synthetic.py  synthetic CT series generator
-  migrations/       schema (001_initial.sql, 002_upload_sessions.sql)
-  tests/            unit + integration tests
-frontend/src/       React app (Viewer, Series, Import & jobs); location.ts, upload.ts
-frontend/tests/     Vitest unit and component tests
-docs/               design.md, devops.md
-scripts/smoke_test.sh
-.github/workflows/ci.yml
+
+### Updating an existing database
+
+Fresh installations use `backend/schema.sql`. Before running the updated API/workers against an existing database,
+stop those processes, back up PostgreSQL, and apply the files in `backend/migrations/` in order. `001` removes the
+sagittal output's NOT NULL constraint; `002` adds upload sessions, the outbox and lease columns, and requeues
+jobs left running. Neither deletes existing series or results.
+From PowerShell, using the database credentials configured in Compose:
+
+```powershell
+Get-ChildItem backend/migrations/*.sql | Sort-Object Name | ForEach-Object { Get-Content -Raw $_ | docker compose exec -T db sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' }
 ```
 
-### Troubleshooting
+Rebuild/restart the API, workers, relay and web app together after the migrations. The series response now includes
+`analysis_available`; metadata can exist without an image. No migration is applied automatically at API startup.
 
-* **Linux: "Permission denied" reading `data/`.** The containers run as uid 10001 and need read access:
-  `chmod -R a+rX data`.
-* **Nothing listed under Import.** Check that each series is a sub-folder of `data/` (or of `DICOM_LIBRARY_DIR`)
-  and that the stack was started from the repository root.
-* **Logs:** `docker compose logs -f api worker`.
+### Backend conventions and supported data
+
+Use explicit keyword arguments for application function calls, such as `get_series(series_id=series_id)`.
+Keep positional arguments where Python or a third-party API requires them (including the RQ task invocation).
+Services use typed records, the HTTP layer uses Pydantic response models, and SQL stays in the repository.
+Ruff checks imports, common errors and application function annotations; `ruff format` maintains formatting.
+Database and storage failures are retried from PostgreSQL attempt counts; data problems fail the job at once with a readable error.
+The API closes its database pool on shutdown.
+
+The current reconstruction supports single-frame MONOCHROME2 CT in standard axial orientation, matching image
+sizes and pixel spacing, aligned in-plane origins, and approximately uniform z spacing. It rejects unsupported
+geometry with a reason rather than displaying a distorted sagittal reconstruction. Metadata remains searchable.
+See `docs/design.md` for which parts of the full-service design are implemented.

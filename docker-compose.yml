@@ -1,121 +1,104 @@
-# CT DICOM viewer: docker compose up --build   ->  http://localhost:8080
-#
-#   web ──/api──▶ api ──▶ db ◀── worker (x2)
-#    nginx        FastAPI   Postgres   claims jobs with SKIP LOCKED
-#
-# Only `web` publishes a port. Everything else talks on the private compose network by service name.
-
 name: ct-viewer
 
 x-backend: &backend
-  build:
-    context: ./backend
-    target: runtime
-  image: ct-viewer-backend:local
-  environment: &backend-env
-    POSTGRES_HOST: db
-    POSTGRES_DB: ${POSTGRES_DB:-ctviewer}
-    POSTGRES_USER: ${POSTGRES_USER:-ctviewer}
-    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ctviewer-dev-only}
-    LIBRARY_ROOT: /data/library
-    UPLOAD_ROOT: /data/uploads
-    DERIVED_ROOT: /data/derived
-    LOG_LEVEL: ${LOG_LEVEL:-INFO}
-    JOB_MAX_ATTEMPTS: ${JOB_MAX_ATTEMPTS:-3}
-    JOB_LEASE_SECONDS: ${JOB_LEASE_SECONDS:-120}
-    WORKER_KINDS: ${WORKER_KINDS:-ingest,analyze}
-    MAX_UPLOAD_FILE_MB: ${MAX_UPLOAD_FILE_MB:-50}
-    MAX_UPLOAD_TOTAL_MB: ${MAX_UPLOAD_TOTAL_MB:-2048}
+  build: ./backend
+  image: ct-viewer-backend
+  environment:
+    DATABASE_URL: postgresql://ctviewer:${POSTGRES_PASSWORD:-ctviewer}@db:5432/ctviewer
+    REDIS_URL: redis://redis:6379/0
+    DATA_DIR: /data
+    S3_ENDPOINT: http://storage:9000
+    S3_PUBLIC_ENDPOINT: ${S3_PUBLIC_ENDPOINT:-http://localhost:9000}
+    S3_ACCESS_KEY: ${S3_ACCESS_KEY:-ctviewer}
+    S3_SECRET_KEY: ${S3_SECRET_KEY:-ctviewer-local-storage}
+    S3_BUCKET: ct-studies
+    UPLOAD_ORIGINS: '["http://localhost:${WEB_PORT:-8080}", "http://localhost:5173"]'
+  volumes:
+    - ${DATA_DIR:-./data}:/data:ro  # the DICOM library, read-only
+  depends_on:
+    db: { condition: service_healthy }
+    redis: { condition: service_healthy }
+    storage-init: { condition: service_completed_successfully }
   restart: unless-stopped
 
 services:
-  db:
-    image: postgres:17-alpine
+  storage:
+    build: ./storage
+    image: ct-viewer-storage
+    command: ["server", "/data"]
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-ctviewer}
-      POSTGRES_USER: ${POSTGRES_USER:-ctviewer}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ctviewer-dev-only}
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-ctviewer}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-ctviewer-local-storage}
+      MINIO_API_CORS_ALLOW_ORIGIN: http://localhost:${WEB_PORT:-8080},http://localhost:5173
+    ports:
+      - "127.0.0.1:${STORAGE_PORT:-9000}:9000"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - objectdata:/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:9000/minio/health/live"]
       interval: 5s
-      timeout: 3s
       retries: 20
     restart: unless-stopped
 
-  # One-shot: applies SQL migrations, then exits. api and worker wait for it to succeed.
-  migrate:
+  storage-init:
     <<: *backend
-    command: ["python", "-m", "app.migrate"]
-    restart: "no"
+    command: ["python", "-m", "app.services.storage"]
     depends_on:
-      db:
-        condition: service_healthy
+      storage: { condition: service_healthy }
+    restart: "no"
+
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ctviewer
+      POSTGRES_USER: ctviewer
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ctviewer}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./backend/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro  # applied once, on an empty volume
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "ctviewer", "-d", "ctviewer"]
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:8-alpine
+    command: ["redis-server", "--appendonly", "yes"]  # queued jobs survive a restart
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+    restart: unless-stopped
 
   api:
     <<: *backend
-    environment:
-      <<: *backend-env
-      WEB_CONCURRENCY: "2"
-    volumes:
-      - ${DICOM_LIBRARY_DIR:-./data}:/data/library:ro
-      - uploads:/data/uploads
-      - derived:/data/derived:ro
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
       interval: 10s
-      timeout: 5s
-      retries: 6
       start_period: 10s
 
   worker:
     <<: *backend
-    command: ["python", "-m", "app.worker"]
-    volumes:
-      - ${DICOM_LIBRARY_DIR:-./data}:/data/library:ro
-      - uploads:/data/uploads:ro
-      - derived:/data/derived
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
+    command: ["rq", "worker", "--url", "redis://redis:6379/0", "--worker-class", "app.worker.Worker"]
     deploy:
-      replicas: ${WORKER_REPLICAS:-2}
-    # Unhealthy if the polling loop has not touched its heartbeat file for a minute.
-    healthcheck:
-      test: ["CMD", "python", "-c", "import os, sys, time; sys.exit(time.time() - os.path.getmtime('/tmp/worker-heartbeat') > 60)"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
-    stop_grace_period: 2m  # SIGTERM lets the current job finish
+      replicas: 2  # two series are processed at the same time
+
+  relay:
+    <<: *backend
+    command: ["python", "-m", "app.relay"]
 
   web:
     build: ./frontend
-    image: ct-viewer-web:local
+    image: ct-viewer-web
     ports:
-      # Localhost only by default: the demo has no login. WEB_BIND=0.0.0.0 exposes it on the network.
-      - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-8080}:80"
+      - "127.0.0.1:${WEB_PORT:-8080}:80"  # localhost only: the app has no login
     depends_on:
-      api:
-        condition: service_healthy
+      api: { condition: service_healthy }
     restart: unless-stopped
-
-  # Optional: writes a synthetic CT series into the library.
-  #   docker compose --profile tools run --rm demo-data
-  demo-data:
-    <<: *backend
-    profiles: ["tools"]
-    user: root  # the bind-mounted host folder may not be writable by the image user; files are chowned back
-    command: ["python", "-m", "app.tools.synthetic", "/data/library/synthetic_chest", "--slices", "200"]
-    volumes:
-      - ${DICOM_LIBRARY_DIR:-./data}:/data/library
-    restart: "no"
 
 volumes:
   pgdata:
-  uploads:
-  derived:
+  redisdata:
+  objectdata:
