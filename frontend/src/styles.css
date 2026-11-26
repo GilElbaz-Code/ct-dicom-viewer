@@ -1,7 +1,8 @@
 /* Only what Mantine does not cover: the black image frames and the overlays drawn on top of the images. */
 
 :root {
-  --frame-height: clamp(320px, 64vh, 720px);
+  /* The window minus header, toolbar and panel title, so the viewer fits without scrolling. */
+  --frame-height: max(300px, calc(100dvh - 230px));
   --slice-color: var(--mantine-color-yellow-5);
 }
 
@@ -56,4 +57,12 @@
   color: var(--slice-color);
   text-shadow: 0 1px 2px #000;
   font-variant-numeric: tabular-nums;
+}
+
+/* Logo on the left, tabs centred on the page whatever the logo's width. */
+.header {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  height: 100%;
 }

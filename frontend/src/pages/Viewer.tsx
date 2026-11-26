@@ -51,34 +51,40 @@ export function Viewer({ seriesId, onSelect, onGoToJobs }: Props) {
     );
   }
 
+  const picker = (
+    <Select
+      label="Series"
+      placeholder="Choose a series"
+      searchable
+      w={360}
+      value={id === null ? null : String(id)}
+      onChange={(value) => value && onSelect(Number(value))}
+      data={(list.data ?? []).map((s) => ({
+        value: String(s.id),
+        label: `${s.study_description ?? "No study description"}: ${s.series_description ?? "no series description"} (${s.num_slices} slices)`,
+      }))}
+    />
+  );
+
   return (
-    <Stack gap="lg">
-      <Select
-        aria-label="Series"
-        placeholder="Choose a series"
-        searchable
-        maw={720}
-        value={id === null ? null : String(id)}
-        onChange={(value) => value && onSelect(Number(value))}
-        data={(list.data ?? []).map((s) => ({
-          value: String(s.id),
-          label: `${s.study_description ?? "No study description"}: ${s.series_description ?? "no series description"} (${s.num_slices} slices)`,
-        }))}
-      />
+    <Stack gap="md">
       {(list.error ?? series.error) && <Alert color="red">{(list.error ?? series.error)!.message}</Alert>}
       {/* The key resets the slice and window when another series (or a re-indexed one) is shown. */}
-      {series.data && (series.data.analysis_available
-        ? <SeriesView key={`${series.data.id}-${series.data.updated_at}`} series={series.data} />
-        : <Stack>
-            <Alert color="yellow">Metadata is indexed, but analysis is not available. Check Jobs for progress or the failure reason.</Alert>
-            <Button variant="light" onClick={onGoToJobs}>Go to jobs</Button>
-            <Metadata series={series.data} />
-          </Stack>)}
+      {series.data?.analysis_available
+        ? <SeriesView key={`${series.data.id}-${series.data.updated_at}`} series={series.data} picker={picker} />
+        : <Stack maw={520}>
+            {picker}
+            {series.data && <>
+              <Alert color="yellow">Metadata is indexed, but analysis is not available. Check Jobs for progress or the failure reason.</Alert>
+              <Button variant="light" onClick={onGoToJobs}>Go to jobs</Button>
+              <Metadata series={series.data} />
+            </>}
+          </Stack>}
     </Stack>
   );
 }
 
-function SeriesView({ series }: { series: Series }) {
+function SeriesView({ series, picker }: { series: Series; picker: ReactNode }) {
   const [mode, setMode] = useState<"mm" | "index">("mm");
   const [input, setInput] = useState<string | number>("");
   const [target, setTarget] = useState<SliceTarget>({ index: Math.floor(series.num_slices / 2) });
@@ -101,9 +107,68 @@ function SeriesView({ series }: { series: Series }) {
   // Sagittal image rows run from the highest z (top) to the lowest; the line goes through the middle of the slice's row.
   const lineTop = slice ? ((slice.num_slices - 1 - slice.index + 0.5) / slice.num_slices) * 100 : null;
 
+  // Every control sits in one toolbar row, so the images and the details column both fit the window height.
   return (
-    <Grid gap="lg">
-      <Grid.Col span={{ base: 12, lg: 8 }}>
+    <Stack gap="md">
+      <Group gap="lg" align="flex-end">
+        {picker}
+        <form onSubmit={show}>
+          <Group gap="xs" align="flex-end">
+            <SegmentedControl
+              aria-label="Location unit"
+              value={mode}
+              onChange={(value) => {
+                setMode(value as "mm" | "index");
+                setInput("");
+              }}
+              data={[
+                { value: "mm", label: "z (mm)" },
+                { value: "index", label: "Index" },
+              ]}
+            />
+            <NumberInput
+              w={150}
+              label={mode === "mm" ? "Location in mm" : "Slice index"}
+              placeholder={
+                mode === "mm"
+                  ? `${Number(series.z_min.toFixed(1))} to ${Number(series.z_max.toFixed(1))}`
+                  : `0 to ${series.num_slices - 1}`
+              }
+              allowDecimal={mode === "mm"}
+              value={input}
+              onChange={setInput}
+            />
+            <Button type="submit">Show</Button>
+          </Group>
+        </form>
+        <Group gap="xs" align="flex-end">
+          <SegmentedControl
+            aria-label="Window preset"
+            value={preset}
+            onChange={(label) => {
+              const p = PRESETS.find((x) => x.label === label);
+              if (p) setWindowing({ width: p.width, level: p.level });
+            }}
+            data={[...PRESETS.map((p) => p.label), { label: "Custom", value: "Custom", disabled: true }]}
+          />
+          <NumberInput
+            w={90}
+            label="Width"
+            min={1}
+            value={windowing.width}
+            onChange={(v) => typeof v === "number" && v > 0 && setWindowing((w) => ({ ...w, width: v }))}
+          />
+          <NumberInput
+            w={90}
+            label="Level"
+            value={windowing.level}
+            onChange={(v) => typeof v === "number" && setWindowing((w) => ({ ...w, level: v }))}
+          />
+        </Group>
+      </Group>
+
+      <Grid gap="lg">
+        <Grid.Col span={{ base: 12, lg: 8 }}>
         <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="md">
           <Panel title="Axial">
             {slice && (
@@ -140,37 +205,8 @@ function SeriesView({ series }: { series: Series }) {
       </Grid.Col>
 
       <Grid.Col span={{ base: 12, lg: 4 }}>
-        <Stack gap="xl">
-          <Section title="Location">
-            <SegmentedControl
-              fullWidth
-              value={mode}
-              onChange={(value) => {
-                setMode(value as "mm" | "index");
-                setInput("");
-              }}
-              data={[
-                { value: "mm", label: "Millimetres (z)" },
-                { value: "index", label: "Slice index" },
-              ]}
-            />
-            <form onSubmit={show}>
-              <Group gap="xs" align="flex-start">
-                <NumberInput
-                  flex={1}
-                  aria-label={mode === "mm" ? "Location in millimetres" : "Slice index"}
-                  placeholder={
-                    mode === "mm"
-                      ? `${Number(series.z_min.toFixed(1))} to ${Number(series.z_max.toFixed(1))}`
-                      : `0 to ${series.num_slices - 1}`
-                  }
-                  allowDecimal={mode === "mm"}
-                  value={input}
-                  onChange={setInput}
-                />
-                <Button type="submit">Show</Button>
-              </Group>
-            </form>
+        <Stack gap="lg">
+          <Section title="Slice">
             <Slider
               color="yellow"
               min={0}
@@ -183,38 +219,13 @@ function SeriesView({ series }: { series: Series }) {
             <SliceStatus target={target} error={located.error} slice={slice} series={series} />
           </Section>
 
-          <Section title="Window">
-            <SegmentedControl
-              fullWidth
-              size="xs"
-              value={preset}
-              onChange={(label) => {
-                const p = PRESETS.find((x) => x.label === label);
-                if (p) setWindowing({ width: p.width, level: p.level });
-              }}
-              data={[...PRESETS.map((p) => p.label), { label: "Custom", value: "Custom", disabled: true }]}
-            />
-            <Group grow>
-              <NumberInput
-                label="Width"
-                min={1}
-                value={windowing.width}
-                onChange={(v) => typeof v === "number" && v > 0 && setWindowing((w) => ({ ...w, width: v }))}
-              />
-              <NumberInput
-                label="Level"
-                value={windowing.level}
-                onChange={(v) => typeof v === "number" && setWindowing((w) => ({ ...w, level: v }))}
-              />
-            </Group>
-          </Section>
-
           <Section title="Series details">
             <Metadata series={series} />
           </Section>
         </Stack>
       </Grid.Col>
     </Grid>
+    </Stack>
   );
 }
 
@@ -265,7 +276,7 @@ function Metadata({ series }: { series: Series }) {
     ["z range", `${mm(series.z_min)} to ${mm(series.z_max)}`],
   ];
   return (
-    <DataList withDivider size="sm" labelWidth={170}>
+    <DataList size="xs" labelWidth={150}>
       {rows.map(([label, value]) => (
         <DataList.Item key={label}>
           <DataList.ItemLabel>{label}</DataList.ItemLabel>

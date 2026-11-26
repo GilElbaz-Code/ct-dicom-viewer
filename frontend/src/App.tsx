@@ -29,7 +29,7 @@ export function App() {
   return (
     <AppShell header={{ height: 60 }} padding="lg">
       <AppShell.Header px="lg">
-        <Group h="100%" justify="space-between">
+        <div className="header">
           <Group gap="sm">
             <Logo />
             <Title order={1} fz="lg">
@@ -37,6 +37,7 @@ export function App() {
             </Title>
           </Group>
           <SegmentedControl
+            size="md"
             value={tab}
             onChange={(value) => setTab(value as Tab)}
             data={[
@@ -45,7 +46,7 @@ export function App() {
               { value: "jobs", label: "Jobs" },
             ]}
           />
-        </Group>
+        </div>
       </AppShell.Header>
       <AppShell.Main>
         {tab === "viewer" && <Viewer seriesId={seriesId} onSelect={setSeriesId} onGoToJobs={() => setTab("jobs")} />}
