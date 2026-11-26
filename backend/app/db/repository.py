@@ -75,12 +75,13 @@ def delete_expired_idempotency_keys() -> int:
         ).rowcount
 
 
-def list_jobs(batch_id: UUID | None, limit: int = 200) -> list[JobRecord]:
+def list_jobs(batch_id: UUID | None, before_id: int | None, limit: int) -> list[JobRecord]:
+    """Newest first. Keyset pagination: the next page starts below the last id seen, so rows never shift."""
     with pool().connection() as conn:
         return conn.execute(
-            f"SELECT {JOB_COLUMNS} FROM jobs WHERE %(batch)s::uuid IS NULL OR batch_id = %(batch)s "
-            "ORDER BY id DESC LIMIT %(limit)s",
-            {"batch": batch_id, "limit": limit},
+            f"SELECT {JOB_COLUMNS} FROM jobs WHERE (%(batch)s::uuid IS NULL OR batch_id = %(batch)s) "
+            "AND (%(before)s::bigint IS NULL OR id < %(before)s) ORDER BY id DESC LIMIT %(limit)s",
+            {"batch": batch_id, "before": before_id, "limit": limit},
         ).fetchall()
 
 
@@ -158,35 +159,33 @@ def finish_failed_attempt(*, claim: Claim, error: str, retryable: bool) -> None:
             )
 
 
+# Every header column of a series row, in schema order. Constants, so building SQL from them is safe.
+SERIES_FIELDS = (
+    "series_uid", "study_uid", "patient_id", "study_description", "series_description", "modality", "pixel_spacing",
+    "slice_thickness", "spacing_between_slices", "slice_spacing", "rows", "columns", "z_positions", "files",
+    "source_path", "sagittal",
+)  # fmt: skip
+
+
+def upsert_series(*, conn: Connection[DictRow], series: dict[str, Any], replace_analyzed: bool) -> int:
+    """Write one complete version of a series: headers, slice files and plane always come from the same read."""
+    updates = ", ".join(f"{field} = EXCLUDED.{field}" for field in SERIES_FIELDS[1:])
+    row = conn.execute(
+        f"INSERT INTO series ({', '.join(SERIES_FIELDS)}) VALUES ({', '.join(f'%({f})s' for f in SERIES_FIELDS)}) "
+        f"ON CONFLICT (series_uid) DO UPDATE SET {updates}, updated_at = now() "
+        f"{'' if replace_analyzed else 'WHERE series.sagittal IS NULL'} RETURNING id",
+        series,
+    ).fetchone()
+    if row is None:  # an analyzed version stays whole until a successful analysis replaces it
+        row = conn.execute("SELECT id FROM series WHERE series_uid = %s", (series["series_uid"],)).fetchone()
+    return row["id"]
+
+
 def save_series_metadata(*, claim: Claim, series: dict[str, Any]) -> int:
-    """Commit searchable headers before analysis; preserve an existing successful result."""
+    """Make a new series searchable before analysis. An analyzed series keeps its current version meanwhile."""
     with pool().connection() as conn:
         require_lease(conn=conn, claim=claim)
-        series_id = conn.execute(
-            """
-            INSERT INTO series (series_uid, study_uid, patient_id, study_description, series_description, modality,
-                                pixel_spacing, slice_thickness, spacing_between_slices, slice_spacing, rows, columns,
-                                z_positions, files, source_path)
-            VALUES (%(series_uid)s, %(study_uid)s, %(patient_id)s, %(study_description)s, %(series_description)s,
-                    %(modality)s, %(pixel_spacing)s, %(slice_thickness)s, %(spacing_between_slices)s,
-                    %(slice_spacing)s, %(rows)s, %(columns)s, %(z_positions)s, %(files)s,
-                    %(source_path)s)
-            ON CONFLICT (series_uid) DO UPDATE SET
-                study_uid = EXCLUDED.study_uid, patient_id = EXCLUDED.patient_id,
-                study_description = EXCLUDED.study_description, series_description = EXCLUDED.series_description,
-                modality = EXCLUDED.modality, pixel_spacing = EXCLUDED.pixel_spacing,
-                slice_thickness = EXCLUDED.slice_thickness, spacing_between_slices = EXCLUDED.spacing_between_slices,
-                slice_spacing = EXCLUDED.slice_spacing, rows = EXCLUDED.rows, columns = EXCLUDED.columns,
-                z_positions = EXCLUDED.z_positions, files = EXCLUDED.files,
-                source_path = EXCLUDED.source_path, updated_at = now(),
-                -- Keep the earlier result only if it fits the new slices: a plane of another shape cannot be drawn.
-                sagittal = CASE WHEN series.rows = EXCLUDED.rows
-                                 AND cardinality(series.z_positions) = cardinality(EXCLUDED.z_positions)
-                                THEN series.sagittal END
-            RETURNING id
-            """,
-            series,
-        ).fetchone()["id"]
+        series_id = upsert_series(conn=conn, series={**series, "sagittal": None}, replace_analyzed=False)
         conn.execute(
             "UPDATE jobs SET series_id = %s, stage = 'analysis' WHERE id = %s",
             (series_id, claim.job_id),
@@ -194,26 +193,28 @@ def save_series_metadata(*, claim: Claim, series: dict[str, Any]) -> int:
         return series_id
 
 
-def save_analysis_and_finish_job(*, claim: Claim, series_id: int, sagittal: bytes) -> None:
-    """Publish the output and successful job outcome atomically."""
+def save_analysis_and_finish_job(*, claim: Claim, series: dict[str, Any], sagittal: bytes) -> None:
+    """Swap in the whole new version (headers, files, plane) and mark the job done, atomically.
+
+    Concurrent jobs for one SeriesInstanceUID each write a complete version; the last to finish wins.
+    """
     with pool().connection() as conn:
         require_lease(conn=conn, claim=claim)
+        series_id = upsert_series(conn=conn, series={**series, "sagittal": sagittal}, replace_analyzed=True)
         conn.execute(
-            "UPDATE series SET sagittal = %s, updated_at = now() WHERE id = %s",
-            (sagittal, series_id),
-        )
-        conn.execute(
-            "UPDATE jobs SET status = 'done', stage = 'complete', error = NULL, finished_at = now(), "
+            "UPDATE jobs SET status = 'done', stage = 'complete', error = NULL, finished_at = now(), series_id = %s, "
             "attempt_token = NULL, lease_expires_at = NULL WHERE id = %s",
-            (claim.job_id,),
+            (series_id, claim.job_id),
         )
 
 
 # --- series -------------------------------------------------------------------------------------
 
 
-def search_series(max_slice_thickness: float | None, description: str | None, limit: int = 500) -> list[SeriesRecord]:
-    """E.g. every series thinner than 1.5 mm, or every study whose description contains a word."""
+def search_series(
+    max_slice_thickness: float | None, description: str | None, before_id: int | None, limit: int
+) -> list[SeriesRecord]:
+    """E.g. every series thinner than 1.5 mm, or every study whose description contains a word. Newest first."""
     with pool().connection() as conn:
         return conn.execute(
             f"""
@@ -221,12 +222,14 @@ def search_series(max_slice_thickness: float | None, description: str | None, li
             WHERE (%(thickness)s::float8 IS NULL OR slice_thickness < %(thickness)s)
               AND (%(text)s::text IS NULL
                    OR study_description ILIKE %(pattern)s OR series_description ILIKE %(pattern)s)
+              AND (%(before)s::bigint IS NULL OR id < %(before)s)
             ORDER BY id DESC LIMIT %(limit)s
             """,
             {
                 "thickness": max_slice_thickness,
                 "text": description,
                 "pattern": f"%{like_literal(description)}%",
+                "before": before_id,
                 "limit": limit,
             },
         ).fetchall()

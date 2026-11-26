@@ -1,7 +1,7 @@
 import { Alert, Button, Group, NumberInput, Paper, Stack, Table, Text, TextInput } from "@mantine/core";
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery } from "@tanstack/react-query";
 import { type SubmitEvent, useState } from "react";
-import { api } from "../api";
+import { api, nextPage } from "../api";
 
 type Filters = { max_slice_thickness?: number; description?: string };
 
@@ -10,7 +10,13 @@ export function Search({ onOpen }: { onOpen: (id: number) => void }) {
   const [thickness, setThickness] = useState<string | number>("");
   const [text, setText] = useState("");
   const [filters, setFilters] = useState<Filters>({});
-  const result = useQuery({ queryKey: ["series", "search", filters], queryFn: () => api.searchSeries(filters) });
+  const result = useInfiniteQuery({
+    queryKey: ["series", "search", filters],
+    queryFn: ({ pageParam }) => api.searchSeries(filters, pageParam),
+    initialPageParam: undefined as number | undefined,
+    getNextPageParam: nextPage,
+  });
+  const rows = result.data?.pages.flat();
 
   function search(event: SubmitEvent) {
     event.preventDefault();
@@ -51,7 +57,7 @@ export function Search({ onOpen }: { onOpen: (id: number) => void }) {
 
       <Paper withBorder p="md">
         <Text size="sm" c="dimmed" mb="sm">
-          {result.data ? `${result.data.length} series` : "Searching…"}
+          {rows ? `${rows.length}${result.hasNextPage ? " most recent" : ""} series` : "Searching…"}
         </Text>
         <Table.ScrollContainer minWidth={760}>
           <Table highlightOnHover tabularNums verticalSpacing="sm">
@@ -68,7 +74,7 @@ export function Search({ onOpen }: { onOpen: (id: number) => void }) {
               </Table.Tr>
             </Table.Thead>
             <Table.Tbody>
-              {result.data?.map((s) => (
+              {rows?.map((s) => (
                 <Table.Tr key={s.id}>
                   <Table.Td>{s.patient_id}</Table.Td>
                   <Table.Td>{s.study_description}</Table.Td>
@@ -89,7 +95,12 @@ export function Search({ onOpen }: { onOpen: (id: number) => void }) {
             </Table.Tbody>
           </Table>
         </Table.ScrollContainer>
-        {result.data?.length === 0 && (
+        {result.hasNextPage && (
+          <Button variant="default" mt="sm" loading={result.isFetchingNextPage} onClick={() => result.fetchNextPage()}>
+            Load older series
+          </Button>
+        )}
+        {rows?.length === 0 && (
           <Text size="sm" mt="sm">
             No series match these filters. Clear them, or index more folders on the Jobs tab.
           </Text>

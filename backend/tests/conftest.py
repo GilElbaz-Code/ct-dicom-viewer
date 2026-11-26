@@ -6,7 +6,9 @@ from pydicom.dataset import Dataset, FileMetaDataset
 from pydicom.uid import CTImageStorage, ExplicitVRLittleEndian, generate_uid
 
 
-def write_slice(path, z, *, series_uid="1.2.826.0.1.1", value=0, size=8, orientation=(1, 0, 0, 0, 1, 0)):
+def write_slice(
+    path, z, *, series_uid="1.2.826.0.1.1", value=0, size=8, orientation=(1, 0, 0, 0, 1, 0), pixel_spacing=(0.5, 0.5)
+):
     """One 8x8 CT slice at height z whose stored pixels all equal `value` (HU = value - 1024)."""
     meta = FileMetaDataset()
     meta.MediaStorageSOPClassUID = CTImageStorage
@@ -24,7 +26,7 @@ def write_slice(path, z, *, series_uid="1.2.826.0.1.1", value=0, size=8, orienta
     ds.SeriesDescription = "AXIAL 1MM"
     ds.ImagePositionPatient = [0, 0, z]
     ds.ImageOrientationPatient = list(orientation)
-    ds.PixelSpacing = [0.5, 0.5]
+    ds.PixelSpacing = list(pixel_spacing)
     ds.SliceThickness = 1.0
     ds.Rows = ds.Columns = size
     ds.SamplesPerPixel = 1

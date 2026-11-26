@@ -13,9 +13,9 @@ import {
   TextInput,
   Title,
 } from "@mantine/core";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type SubmitEvent, useState } from "react";
-import { type JobStatus, api } from "../api";
+import { type JobStatus, api, nextPage } from "../api";
 
 const STATUS: Record<JobStatus, { label: string; color: string }> = {
   queued: { label: "Queued", color: "gray" },
@@ -32,13 +32,16 @@ export function Jobs({ onOpen }: { onOpen: (id: number) => void }) {
   const [csv, setCsv] = useState<File | null>(null);
 
   const directories = useQuery({ queryKey: ["directories"], queryFn: api.directories });
-  const jobs = useQuery({
+  const jobs = useInfiniteQuery({
     queryKey: ["jobs", batchId],
-    queryFn: () => api.jobs(batchId),
+    queryFn: ({ pageParam }) => api.jobs(batchId, pageParam),
+    initialPageParam: undefined as number | undefined,
+    getNextPageParam: nextPage,
     // Poll only while something is still waiting or running.
     refetchInterval: (query) =>
-      query.state.data?.some((job) => job.status === "queued" || job.status === "running") ? 2000 : false,
+      query.state.data?.pages.flat().some((job) => job.status === "queued" || job.status === "running") ? 2000 : false,
   });
+  const jobList = jobs.data?.pages.flat();
 
   const refreshJobs = () => queryClient.invalidateQueries({ queryKey: ["jobs"] });
   const indexFolder = useMutation({
@@ -148,7 +151,7 @@ export function Jobs({ onOpen }: { onOpen: (id: number) => void }) {
               </Table.Tr>
             </Table.Thead>
             <Table.Tbody>
-              {jobs.data?.map((job) => (
+              {jobList?.map((job) => (
                 <Table.Tr key={job.id}>
                   <Table.Td>{job.id}</Table.Td>
                   <Table.Td>
@@ -181,7 +184,12 @@ export function Jobs({ onOpen }: { onOpen: (id: number) => void }) {
             </Table.Tbody>
           </Table>
         </Table.ScrollContainer>
-        {jobs.data?.length === 0 && <Text size="sm" mt="sm">No jobs yet. Index a folder or a CSV above.</Text>}
+        {jobList?.length === 0 && <Text size="sm" mt="sm">No jobs yet. Index a folder or a CSV above.</Text>}
+        {jobs.hasNextPage && (
+          <Button variant="default" mt="sm" loading={jobs.isFetchingNextPage} onClick={() => jobs.fetchNextPage()}>
+            Load older jobs
+          </Button>
+        )}
       </Paper>
     </Stack>
   );

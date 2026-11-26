@@ -44,7 +44,7 @@ Needs only Docker with Compose v2 (Docker Desktop, or Docker Engine 24+).
 
 Stop with `docker compose down`. Add `-v` to also delete the database.
 More workers process more series at once: `docker compose up -d --scale worker=6`. For autoscaling on
-Kubernetes, see [docs/devops.md](docs/devops.md#scaling).
+Kubernetes, see [deploy/k8s/README.md](deploy/k8s/README.md).
 
 ## Why PostgreSQL
 
@@ -58,9 +58,9 @@ Postgres when its volume is first created.
 
 * Move the sagittal images (~350 KB each, ~350 GB in total) out of the database into object storage (S3/MinIO),
   keeping only the key in the row.
-* Add a `pg_trgm` GIN index for "description contains" searches, which today scan the table. Add keyset
-  pagination, since the API returns at most 500 rows. Elasticsearch/OpenSearch only if search grows into free
-  text or facets over many header fields.
+* Add a `pg_trgm` GIN index for "description contains" searches, which today scan the table. The lists are
+  already paged by id (keyset), so deep pages stay as fast as the first. Elasticsearch/OpenSearch only if search
+  grows into free text or facets over many header fields.
 * Split studies into their own table and keep extra header fields in an indexed JSONB column, so new query fields
   need no migration. Adopt a migration tool (Alembic or plain numbered SQL files) instead of a single init script.
 * Partition or archive the `jobs` table by month; put PgBouncer in front and a read replica behind the search page.
@@ -74,9 +74,13 @@ to a Redis queue (and publishes again if a message is lost). An RQ `worker` take
 renewable lease, reads the DICOM
 headers, checks the folder holds one series, and sorts the slices by position. It commits the header metadata
 before validating viewer geometry and reading pixels to build the sagittal plane
-(the "analysis"). The output and successful job status commit together. If analysis fails, metadata remains
-searchable and the viewer shows that analysis is unavailable; an earlier successful result is retained. A
-problem with the data fails the job at once, with the reason. Database errors, a killed job process and a dead
+(the "analysis"). A successful analysis saves the headers, the slice file list and the sagittal plane as one
+version, together with the job's status. If analysis fails, a new series stays searchable and the viewer shows
+that analysis is unavailable. A series that was already analyzed keeps its previous version whole until a
+re-analysis succeeds, so a failed or concurrent re-index never pairs new slice files with an old plane. A
+problem with the data fails the job at once, with the reason: documents, pictures and system files next to the
+slices are skipped, but any other unreadable file, or an image missing its position tags, fails the series and
+is named. Database errors, a killed job process and a dead
 worker are retried twice before the job fails with the reason. A job that already finished is skipped if it is
 delivered again ([design.md, *Durability and failures*](docs/design.md#durability-and-failures)). The viewer reads one DICOM
 file per axial image and windows it into a PNG on the server.
@@ -93,7 +97,7 @@ The backend has three layers, and each only calls the one below it:
 
 | File | What it does |
 |---|---|
-| `backend/schema.sql` | Three tables: `series` (metadata, slice positions, analysis output), `jobs` (status, attempts, lease) and `job_outbox` (dispatch) |
+| `backend/schema.sql` | Four tables: `series` (metadata, slice positions, analysis output), `jobs` (status, attempts, lease), `job_outbox` (dispatch) and `idempotency_keys` (repeated submissions) |
 | `backend/app/services/dicom.py` | Read and validate a folder's headers; HU conversion; sagittal; window/level to PNG |
 | `backend/app/services/ingest.py` | The background job: claim (skips duplicates) → path check → headers → sagittal → save |
 | `backend/app/services/jobs.py` | Submit folders or a CSV; `publish` puts a job ID on RQ (called by the relay) |
@@ -114,8 +118,8 @@ Interactive documentation: **http://localhost:8080/api/docs**.
 | `GET /api/directories` | Folders in the data directory |
 | `POST /api/jobs` `{"path": "…"}` | Index one folder |
 | `POST /api/batches` (CSV upload) | Index every folder listed in a CSV; one job per row |
-| `GET /api/jobs?batch_id=` | Jobs, newest first, with the reason for each failure |
-| `GET /api/series?max_slice_thickness=1.5&description=chest` | Query across studies |
+| `GET /api/jobs?batch_id=&before_id=&limit=` | Jobs, newest first, with the reason for each failure |
+| `GET /api/series?max_slice_thickness=1.5&description=chest&before_id=&limit=` | Query across studies, newest first |
 | `GET /api/series/{id}` | Series metadata |
 | `GET /api/series/{id}/locate?z=…` or `?index=…` | Closest slice to a location in mm, or the slice at an index |
 | `GET /api/series/{id}/axial/{index}?window=400&level=40` | Axial slice as PNG |
@@ -126,6 +130,9 @@ Slice index 0 is the most inferior slice (lowest z). Slices are always ordered b
 never by file name. A location outside the scan shows the nearest slice and says so. *Spacing between slices*
 shows the header tag next to the spacing measured from the positions. Many series leave the tag out, and the
 PET/CT sample writes 3.27 mm while its slices are 2.5 mm apart.
+
+**Paging:** both lists return `limit` rows (default 100, at most 500). A shorter page is the last one; otherwise
+pass the last row's `id` as `before_id` for the next page. The UI's *Load older* buttons do this.
 
 **CSV format:** one folder per row in the first column, relative to `data/`; a first row reading `path` is
 skipped.
@@ -170,6 +177,15 @@ The API closes its database pool on shutdown.
 The current reconstruction supports single-frame MONOCHROME2 CT in standard axial orientation, matching image
 sizes and pixel spacing, aligned in-plane origins, and approximately uniform z spacing. It rejects unsupported
 geometry with a reason rather than displaying a distorted sagittal reconstruction. Metadata remains searchable.
+Non-square pixels are drawn to scale in both views.
+
+Limits to know: indexed files are treated as immutable. The axial view reads them when it is shown, so if files
+are replaced in place, re-index the folder (DICOM gives changed instances new UIDs, so this is rare). The sagittal
+view is the middle column only, and one analysis result is kept per series (the latest success). Besides DICOM,
+a series folder may hold only documents and pictures (`.txt`, `.md`, `.pdf`, `.csv`, `.json`, `.xml`, `.html`,
+`.jpg`, `.png`, `.gif`, `.bmp`, `.log`) and system files (dotfiles, `Thumbs.db`, `desktop.ini`); DICOM objects
+without pixels, such as a DICOMDIR or a report, are skipped too. Any other file that cannot be read fails the
+series, because DICOM slices often have no extension and a truncated one must not shorten the volume silently.
 See `docs/design.md` for which parts of the full-service design are implemented.
 
 ## How AI was used

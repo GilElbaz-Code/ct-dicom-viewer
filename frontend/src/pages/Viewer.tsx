@@ -17,7 +17,7 @@ import {
 import { useDebouncedValue } from "@mantine/hooks";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { type MouseEvent, type SubmitEvent, type ReactNode, useState } from "react";
-import { type Series, type SliceTarget, api, axialUrl, sagittalUrl } from "../api";
+import { type Series, type SliceTarget, WINDOW_LIMITS, api, axialUrl, imageError, sagittalUrl } from "../api";
 
 const PRESETS = [
   { label: "Soft tissue", width: 400, level: 40 },
@@ -51,6 +51,10 @@ export function Viewer({ seriesId, onSelect, onGoToJobs }: Props) {
     );
   }
 
+  // The newest page of series, plus the open one when it is older (opened from Search).
+  const choices = [...(list.data ?? [])];
+  if (series.data && !choices.some((s) => s.id === series.data.id)) choices.push(series.data);
+
   const picker = (
     <Select
       label="Series"
@@ -59,7 +63,7 @@ export function Viewer({ seriesId, onSelect, onGoToJobs }: Props) {
       w={360}
       value={id === null ? null : String(id)}
       onChange={(value) => value && onSelect(Number(value))}
-      data={(list.data ?? []).map((s) => ({
+      data={choices.map((s) => ({
         value: String(s.id),
         label: `${s.study_description ?? "No study description"}: ${s.series_description ?? "no series description"} (${s.num_slices} slices)`,
       }))}
@@ -161,15 +165,18 @@ function SeriesView({ series, picker }: { series: Series; picker: ReactNode }) {
           <NumberInput
             w={90}
             label="Width"
-            min={1}
+            {...WINDOW_LIMITS.width}
+            clampBehavior="strict"
             value={windowing.width}
-            onChange={(v) => typeof v === "number" && v > 0 && setWindowing((w) => ({ ...w, width: v }))}
+            onChange={(v) => typeof v === "number" && inRange(v, WINDOW_LIMITS.width) && setWindowing((w) => ({ ...w, width: v }))}
           />
           <NumberInput
             w={90}
             label="Level"
+            {...WINDOW_LIMITS.level}
+            clampBehavior="strict"
             value={windowing.level}
-            onChange={(v) => typeof v === "number" && setWindowing((w) => ({ ...w, level: v }))}
+            onChange={(v) => typeof v === "number" && inRange(v, WINDOW_LIMITS.level) && setWindowing((w) => ({ ...w, level: v }))}
           />
         </Group>
       </Group>
@@ -181,7 +188,7 @@ function SeriesView({ series, picker }: { series: Series; picker: ReactNode }) {
             {slice && (
               <>
                 <div className="image">
-                  <img src={axialUrl(series, slice.index, shown.width, shown.level)} alt={`Axial slice ${slice.index}`} />
+                  <ApiImage src={axialUrl(series, slice.index, shown.width, shown.level)} alt={`Axial slice ${slice.index}`} />
                 </div>
                 <div className="corner top-left">
                   {series.patient_id}
@@ -200,12 +207,13 @@ function SeriesView({ series, picker }: { series: Series; picker: ReactNode }) {
           </Panel>
           <Panel title="Sagittal, mid-volume · click to pick a slice">
             <div className="image pickable" onClick={pickSlice}>
-              <img src={sagittalUrl(series, shown.width, shown.level)} alt="Sagittal view with the chosen slice marked" />
-              {slice && lineTop !== null && (
-                <div className="slice-line" style={{ top: `${lineTop}%` }}>
-                  <span>{mm(slice.z)}</span>
-                </div>
-              )}
+              <ApiImage src={sagittalUrl(series, shown.width, shown.level)} alt="Sagittal view with the chosen slice marked">
+                {slice && lineTop !== null && (
+                  <div className="slice-line" style={{ top: `${lineTop}%` }}>
+                    <span>{mm(slice.z)}</span>
+                  </div>
+                )}
+              </ApiImage>
             </div>
           </Panel>
         </SimpleGrid>
@@ -291,6 +299,22 @@ function Metadata({ series }: { series: Series }) {
         </DataList.Item>
       ))}
     </DataList>
+  );
+}
+
+const inRange = (value: number, { min, max }: { min: number; max: number }) => value >= min && value <= max;
+
+/** An image from the API. If it fails, the API's reason replaces the browser's broken-image icon. */
+function ApiImage({ src, alt, children }: { src: string; alt: string; children?: ReactNode }) {
+  const [failure, setFailure] = useState<{ src: string; message: string } | null>(null);
+  if (failure?.src === src) {
+    return <Text c="red.4" size="sm" p="md">Image unavailable: {failure.message}</Text>;
+  }
+  return (
+    <>
+      <img src={src} alt={alt} onError={() => imageError(src).then((message) => setFailure({ src, message }))} />
+      {children}
+    </>
   );
 }
 

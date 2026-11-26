@@ -5,6 +5,8 @@ import numpy as np
 import pydicom
 import pytest
 from PIL import Image
+from pydicom.dataset import Dataset, FileMetaDataset
+from pydicom.uid import BasicTextSRStorage, ExplicitVRLittleEndian, generate_uid
 
 from app.errors import InvalidInput
 from app.services import dicom
@@ -20,10 +22,59 @@ def test_reads_headers_and_sorts_by_position_not_file_name(make_series):
     assert (info.slice_thickness, info.pixel_spacing, info.rows, info.modality) == (1.0, [0.5, 0.5], 8, "CT")
 
 
-def test_skips_files_that_are_not_dicom(make_series):
+def test_skips_files_that_are_not_images(make_series):
     directory = make_series(n=3)
-    (directory / "README.txt").write_text("not an image")
+    for name in ("README.txt", "notes.pdf", ".DS_Store", "Thumbs.db"):
+        (directory / name).write_text("not an image")
+    report = Dataset()  # a DICOM object without pixels, e.g. a structured report filed with the series
+    report.file_meta = FileMetaDataset()
+    report.file_meta.MediaStorageSOPClassUID = report.SOPClassUID = BasicTextSRStorage
+    report.file_meta.MediaStorageSOPInstanceUID = report.SOPInstanceUID = generate_uid()
+    report.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+    report.SeriesInstanceUID = generate_uid()
+    report.save_as(directory / "report.dcm", enforce_file_format=True)
     assert len(dicom.read_series(directory).files) == 3
+
+
+# make_series names files opposite to z: 005.dcm is the lowest slice, 001.dcm the highest.
+@pytest.mark.parametrize("keep", [0.1, 0.3, 0.5, 0.7])  # no preamble; no tags; SOP class only; no Rows
+def test_a_truncated_end_slice_fails_the_series_instead_of_shortening_it(make_series, keep):
+    directory = make_series(n=5)
+    top = directory / "001.dcm"
+    data = top.read_bytes()
+    top.write_bytes(data[: int(len(data) * keep)])
+    with pytest.raises(InvalidInput, match="001.dcm"):
+        dicom.read_series(directory)
+
+
+@pytest.mark.parametrize("keep", [0.1, 0.3])  # too short to be recognized as DICOM; recognized, but without tags
+def test_a_truncated_end_slice_without_an_extension_fails_too(tmp_path, keep):
+    for i in range(5):  # IM0000 is the lowest slice, IM0004 the highest, as many scanners name them
+        write_slice(tmp_path / f"IM{i:04}", z=-100 + 2.5 * i)
+    top = tmp_path / "IM0004"
+    data = top.read_bytes()
+    top.write_bytes(data[: int(len(data) * keep)])
+    with pytest.raises(InvalidInput, match="IM0004"):
+        dicom.read_series(tmp_path)
+
+
+def test_an_image_without_position_is_reported_by_name(make_series):
+    directory = make_series(n=5)
+    lowest = directory / "005.dcm"
+    ds = pydicom.dcmread(fp=lowest)
+    del ds.ImagePositionPatient
+    ds.save_as(lowest, enforce_file_format=True)
+    with pytest.raises(InvalidInput, match="005.dcm is missing ImagePositionPatient"):
+        dicom.read_series(directory)
+
+
+def test_truncated_pixel_data_is_reported_by_name(make_series):
+    directory = make_series(n=5)
+    top = directory / "001.dcm"
+    top.write_bytes(top.read_bytes()[:-20])  # the header is intact, so only decoding can notice
+    info = dicom.read_series(directory)
+    with pytest.raises(InvalidInput, match="001.dcm: cannot decode the pixel data"):
+        dicom.sagittal(files=info.files, rows=info.rows, columns=info.columns)
 
 
 UNUSABLE = {

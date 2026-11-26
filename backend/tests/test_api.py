@@ -4,6 +4,7 @@ Skipped unless TEST_DATABASE_URL is set: the test drops and recreates the tables
 The RQ queue is replaced by one that runs each task immediately, so no Redis or worker is needed.
 """
 
+import io
 import os
 import shutil
 from concurrent.futures import ThreadPoolExecutor
@@ -12,6 +13,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image
 from redis import ConnectionError as RedisConnectionError
 
 from app.config import settings
@@ -71,6 +73,17 @@ def test_index_search_and_view_a_series(client, make_series):
     assert client.get(f"/api/series/{series_id}/locate").status_code == 422
 
 
+def test_axial_images_keep_physical_proportions_for_non_square_pixels(client, tmp_path):
+    directory = tmp_path / "wide"
+    directory.mkdir()
+    for z in range(3):  # rows 0.5 mm apart, columns 1.0 mm apart: 8 x 8 pixels cover 8 mm wide by 4 mm tall
+        write_slice(directory / f"{z}.dcm", z=z, pixel_spacing=(0.5, 1.0))
+    submit(client, "/api/jobs", json={"path": "wide"})
+    series_id = client.get("/api/jobs").json()[0]["series_id"]
+    png = client.get(f"/api/series/{series_id}/axial/1").content
+    assert Image.open(io.BytesIO(png)).size == (16, 8)  # (width, height): twice as wide as tall
+
+
 def test_batch_rows_fail_one_by_one_with_a_reason(client, make_series):
     make_series("good")
     created = submit(client, "/api/batches", files={"file": ("batch.csv", b"path\ngood\nmissing\n../outside\n")}).json()
@@ -82,6 +95,36 @@ def test_batch_rows_fail_one_by_one_with_a_reason(client, make_series):
     # Data errors fail on the first attempt, with the reason as written (no "Gave up after 3 attempts").
     assert (by_path["missing"]["status"], by_path["missing"]["error"]) == ("failed", "Directory not found: missing")
     assert by_path["../outside"]["error"] == "../outside is outside the data directory"
+
+
+def all_pages(client, url, limit, **params):
+    """Follow before_id until a short page, as the UI's "Load older" button does."""
+    rows, cursor = [], {}
+    while True:
+        page = client.get(url, params={**params, **cursor, "limit": limit}).json()
+        rows += page
+        if len(page) < limit:
+            return rows
+        cursor = {"before_id": page[-1]["id"]}
+
+
+def test_every_job_and_series_is_reachable_page_by_page(client, make_series, tmp_path):
+    csv = "path\n" + "".join(f"missing_{i}\n" for i in range(7))
+    created = client.post("/api/batches", files={"file": ("batch.csv", csv.encode())}).json()
+    client.post("/api/jobs", json={"path": "other"})
+    jobs = all_pages(client, "/api/jobs", limit=3, batch_id=created[0]["batch_id"])
+    assert [job["id"] for job in jobs] == sorted((job["id"] for job in created), reverse=True)  # each row once
+
+    for i in range(4):
+        directory = tmp_path / f"s{i}"
+        directory.mkdir()
+        for z in range(3):
+            write_slice(directory / f"{z}.dcm", z=z, series_uid=f"1.2.826.0.9.{i}")
+        submit(client, "/api/jobs", json={"path": f"s{i}"})
+    series = all_pages(client, "/api/series", limit=3)
+    assert len({s["id"] for s in series}) == len(series) == 4
+    assert client.get("/api/jobs", params={"limit": 501}).status_code == 422
+    assert client.get("/api/series", params={"limit": 0}).status_code == 422
 
 
 def test_a_duplicate_delivery_of_a_finished_job_is_skipped(client, make_series, tmp_path):
@@ -139,7 +182,18 @@ def test_expired_idempotency_keys_are_deleted_so_the_key_can_be_reused(client):
     assert again["id"] != first["id"]
 
 
-def test_reindexing_with_more_slices_drops_the_old_plane_until_analysis_succeeds(client, make_series, monkeypatch):
+def stored_version(series_id):
+    """(slice count, plane rows, files) as saved: the plane must have one row per stored slice file."""
+    with pool().connection() as conn:
+        row = conn.execute(
+            "SELECT cardinality(files) AS n, length(sagittal) / (2 * rows) AS plane_rows, files "
+            "FROM series WHERE id = %s",
+            (series_id,),
+        ).fetchone()
+    return row["n"], row["plane_rows"], row["files"]
+
+
+def test_failed_reanalysis_keeps_the_previous_version_whole(client, make_series, monkeypatch):
     directory = make_series("chest", n=5)
     submit(client, "/api/jobs", json={"path": "chest"})
     write_slice(directory / "000.dcm", z=-87.5, value=50)  # a sixth slice, same SeriesInstanceUID
@@ -147,11 +201,44 @@ def test_reindexing_with_more_slices_drops_the_old_plane_until_analysis_succeeds
     def fail_analysis(**kwargs):
         raise ValueError("Decoder unavailable")
 
+    original = dicom.sagittal
     monkeypatch.setattr(dicom, "sagittal", fail_analysis)
     submit(client, "/api/jobs", json={"path": "chest"})
+    assert client.get("/api/jobs").json()[0]["status"] == "failed"
     [series] = client.get("/api/series").json()
-    assert (series["num_slices"], series["analysis_available"]) == (6, False)
-    assert client.get(f"/api/series/{series['id']}/sagittal").status_code == 422  # not a 500 from a 5-row plane
+    assert (series["num_slices"], series["analysis_available"]) == (5, True)  # the old headers, files and plane
+    assert stored_version(series["id"])[:2] == (5, 5)
+    assert client.get(f"/api/series/{series['id']}/axial/5").status_code == 404  # the new slice is not mixed in
+
+    monkeypatch.setattr(dicom, "sagittal", original)
+    submit(client, "/api/jobs", json={"path": "chest"})
+    assert client.get(f"/api/series/{series['id']}").json()["num_slices"] == 6
+    assert stored_version(series["id"])[:2] == (6, 6)
+    assert client.get(f"/api/series/{series['id']}/axial/5").status_code == 200
+
+
+def test_concurrent_jobs_for_one_series_never_mix_their_files_and_plane(client, make_series, monkeypatch):
+    make_series("first", n=5)
+    make_series("second", n=7)  # the same SeriesInstanceUID, other files
+    first = client.post("/api/jobs", json={"path": "first"}).json()["id"]
+    second = client.post("/api/jobs", json={"path": "second"}).json()["id"]
+    dispatch.publish_due(publish=lambda _: None)
+    original = dicom.sagittal
+    interleaved = []
+
+    def second_job_runs_meanwhile(**kwargs):
+        if not interleaved:  # the first job is between saving its headers and saving its plane
+            interleaved.append(True)
+            ingest.run(job_id=second)
+        return original(**kwargs)
+
+    monkeypatch.setattr(dicom, "sagittal", second_job_runs_meanwhile)
+    ingest.run(job_id=first)
+    assert {job["status"] for job in client.get("/api/jobs").json()} == {"done"}
+    [series] = client.get("/api/series").json()
+    n, plane_rows, files = stored_version(series["id"])
+    assert (series["num_slices"], n, plane_rows) == (5, 5, 5)  # the last job to finish wins, as a whole
+    assert all(Path(f).parent.name == "first" for f in files)
 
 
 def test_description_search_matches_wildcard_characters_literally(client, make_series):
@@ -164,6 +251,9 @@ def test_description_search_matches_wildcard_characters_literally(client, make_s
 def test_numbers_beyond_the_database_types_are_rejected_not_crashing(client):
     assert client.get("/api/series/1/axial/3000000000").status_code == 422
     assert client.get(f"/api/series/{2**63}").status_code == 422
+    for url in ("/api/jobs", "/api/series"):  # a page cursor beyond bigint
+        assert client.get(url, params={"before_id": 2**63}).status_code == 422
+        assert client.get(url, params={"before_id": 2**63 - 1}).status_code == 200
 
 
 def test_queue_outage_keeps_accepted_jobs_queued(client):
@@ -252,7 +342,7 @@ def test_expired_attempt_cannot_write_after_recovery(client):
     with pytest.raises(LeaseLost):
         repository.save_series_metadata(claim=stale, series={})
     with pytest.raises(LeaseLost):
-        repository.save_analysis_and_finish_job(claim=stale, series_id=1, sagittal=b"bad")
+        repository.save_analysis_and_finish_job(claim=stale, series={}, sagittal=b"bad")
     assert repository.renew_lease(claim=current) is True
     assert client.get("/api/jobs").json()[0]["status"] == "running"
 

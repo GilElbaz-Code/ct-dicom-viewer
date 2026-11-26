@@ -1,10 +1,17 @@
 """Request and response shapes. They document the API at /api/docs and filter what leaves the server."""
 
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
+from fastapi import Query
 from pydantic import BaseModel, Field
+
+# Pages are newest first. A page shorter than `limit` is the last one; otherwise pass its last id as `before_id`.
+BeforeId = Annotated[
+    int | None, Query(ge=1, le=2**63 - 1, description="Only rows with a smaller id: the last id of the page before")
+]
+Limit = Annotated[int, Query(ge=1, le=500, description="Page size")]
 
 
 class SubmitPath(BaseModel):

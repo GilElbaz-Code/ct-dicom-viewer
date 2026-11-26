@@ -241,15 +241,15 @@ design above, not of the implementation.
 |---|---|
 | Interactive and CSV submission | Mounted folders under `data/`; CSV jobs share a batch ID, but source row numbers are not stored |
 | Browser upload | Not implemented: the Part 2 brief only needs a chosen DICOM directory, which the app takes from the mounted `data/` folder. Direct upload to object storage, verification and sealing stay in the target design |
-| Metadata queries | Thickness and combined description filters exist; explicit study-only/deduplicated search and pagination remain additions |
-| Metadata before analysis | Implemented: headers commit before geometry validation and analysis; output is nullable and the UI displays metadata-only entries |
-| Job history and errors | Stored in PostgreSQL with stage and attempt count; listing is limited to the newest 200 jobs without pagination |
+| Metadata queries | Thickness and combined description filters exist, paged newest first by id (keyset, up to 500 per page); explicit study-only/deduplicated search remains an addition |
+| Metadata before analysis | Implemented for new series: headers commit before geometry validation and analysis; output is nullable and the UI displays metadata-only entries. An analyzed series keeps its previous version searchable until a re-analysis succeeds |
+| Job history and errors | Stored in PostgreSQL with stage and attempt count; paged newest first and filterable by CSV batch, so every row's outcome stays reachable |
 | Dispatch/recovery | Implemented: `job_outbox` rows commit with jobs; `python -m app.relay` publishes due rows, republishes queued jobs without progress, and recovers expired leases or attempts past the 30-minute timeout |
 | Retries and duplicate protection | Implemented: workers claim a job with a new attempt token and a renewed lease; metadata, result and status writes check both. Retryable database errors back off up to three attempts; RQ retries are not used |
-| Results | One sagittal plane currently lives on the series row (latest success wins); job-specific result records are a target addition |
+| Results | One sagittal plane lives on the series row. A successful analysis replaces headers, slice files and plane in one transaction (latest success wins), so failed or concurrent re-indexing never mixes versions; job-specific result records are a target addition |
 | Viewer | z/index, axial and sagittal views, marker, metadata and adjustable 400/40 windowing exist; geometry validation rejects unsupported orientations and irregular spacing |
 | Database deliverables | `backend/schema.sql` contains the schema; README contains the PostgreSQL rationale and million-series changes |
 | Production operations | SSO, TLS, readiness checks and relay/lease/upload monitoring are design capabilities, not local-app features |
 
-The remaining gaps (browser upload, CSV row numbers, job-specific results, pagination, study-level search, operations) do not
+The remaining gaps (browser upload, CSV row numbers, job-specific results, study-level search, operations) do not
 change the architecture; each is an addition to the existing tables and endpoints.

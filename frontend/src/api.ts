@@ -47,6 +47,13 @@ export interface Located {
 
 export type SliceTarget = { z: number } | { index: number };
 
+// Lists come in pages, newest first. A full page means there may be more: ask again with its last id.
+export const PAGE_SIZE = 100;
+export const nextPage = (page: { id: number }[]) => (page.length === PAGE_SIZE ? page[page.length - 1].id : undefined);
+
+// The window/level range the API accepts (Width and Level in backend/app/api/series.py).
+export const WINDOW_LIMITS = { width: { min: 1, max: 10000 }, level: { min: -2000, max: 5000 } };
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`/api${path}`, init);
   const body = await response.json().catch(() => null);
@@ -66,12 +73,13 @@ const query = (params: Record<string, string | number | undefined>) =>
   ).toString();
 
 export const api = {
-  searchSeries: (filters: { max_slice_thickness?: number; description?: string }) =>
-    request<Series[]>(`/series?${query(filters)}`),
+  searchSeries: (filters: { max_slice_thickness?: number; description?: string }, beforeId?: number) =>
+    request<Series[]>(`/series?${query({ ...filters, before_id: beforeId, limit: PAGE_SIZE })}`),
   getSeries: (id: number) => request<Series>(`/series/${id}`),
   locate: (id: number, target: SliceTarget) => request<Located>(`/series/${id}/locate?${query(target)}`),
   directories: () => request<string[]>("/directories"),
-  jobs: (batchId: string | null) => request<Job[]>(`/jobs?${query({ batch_id: batchId ?? undefined })}`),
+  jobs: (batchId: string | null, beforeId?: number) =>
+    request<Job[]>(`/jobs?${query({ batch_id: batchId ?? undefined, before_id: beforeId, limit: PAGE_SIZE })}`),
   indexFolder: (path: string) =>
     request<Job>("/jobs", {
       method: "POST",
@@ -88,6 +96,13 @@ export const api = {
 // Images are plain <img> URLs. `v` changes when a series is re-indexed, so the browser never shows a stale cached image.
 export const axialUrl = (series: Series, index: number, width: number, level: number) =>
   `/api/series/${series.id}/axial/${index}?${query({ window: width, level, v: series.updated_at })}`;
+
+// An <img> cannot read why it failed, so ask the same URL again for the API's message.
+export const imageError = (url: string) =>
+  request<unknown>(url.replace(/^\/api/, "")).then(
+    () => "The image could not be displayed",
+    (error: Error) => error.message,
+  );
 
 export const sagittalUrl = (series: Series, width: number, level: number) =>
   `/api/series/${series.id}/sagittal?${query({ window: width, level, v: series.updated_at })}`;

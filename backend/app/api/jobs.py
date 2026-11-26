@@ -5,7 +5,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Header, UploadFile
 
-from app.api.schemas import Job, SubmitPath
+from app.api.schemas import BeforeId, Job, Limit, SubmitPath
 from app.services import jobs
 from app.types import JobRecord
 
@@ -36,6 +36,6 @@ def submit_batch(file: UploadFile, idempotency_key: IdempotencyKey = None) -> li
 
 
 @router.get("/jobs", response_model=list[Job])
-def list_jobs(batch_id: UUID | None = None) -> list[JobRecord]:
-    """The latest jobs, newest first; with batch_id, only that CSV's jobs."""
-    return jobs.list_jobs(batch_id=batch_id)
+def list_jobs(batch_id: UUID | None = None, before_id: BeforeId = None, limit: Limit = 100) -> list[JobRecord]:
+    """Jobs, newest first, one page at a time; with batch_id, only that CSV's jobs."""
+    return jobs.list_jobs(batch_id=batch_id, before_id=before_id, limit=limit)

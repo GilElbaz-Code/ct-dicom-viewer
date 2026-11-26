@@ -61,8 +61,8 @@ def parse_csv(content: bytes) -> list[str]:
     return paths
 
 
-def list_jobs(batch_id: UUID | None) -> list[JobRecord]:
-    return repository.list_jobs(batch_id=batch_id)
+def list_jobs(batch_id: UUID | None, before_id: int | None, limit: int) -> list[JobRecord]:
+    return repository.list_jobs(batch_id=batch_id, before_id=before_id, limit=limit)
 
 
 def library_directories() -> list[str]:

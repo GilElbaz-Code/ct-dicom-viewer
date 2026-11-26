@@ -15,8 +15,14 @@ from pydicom.pixels import apply_modality_lut
 
 from app.errors import InvalidInput
 
-# A file counts as a slice only if it has the geometry the viewer needs.
+# Every image file must carry the geometry the viewer needs; one without it is reported, not skipped.
 REQUIRED_TAGS = ("SeriesInstanceUID", "ImagePositionPatient", "ImageOrientationPatient", "Rows", "Columns")
+
+# The only non-DICOM files a series folder may contain; any other unreadable file fails the series.
+ANCILLARY_SUFFIXES = frozenset(
+    {".txt", ".md", ".pdf", ".csv", ".json", ".xml", ".html", ".htm", ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".log"}
+)
+ANCILLARY_NAMES = frozenset({"thumbs.db", "desktop.ini"})  # written by file browsers
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,9 +50,21 @@ def read_series(directory: Path, *, validate: bool = True) -> SeriesInfo:
         try:
             ds = pydicom.dcmread(fp=path, stop_before_pixels=True)
         except InvalidDicomError:
-            continue  # not a DICOM file (README, thumbnails, ...)
-        if all(tag in ds for tag in REQUIRED_TAGS):
-            slices.append((path, ds))
+            if is_ancillary(path=path):
+                continue
+            # DICOM files often have no extension, so any other unreadable file may be a slice cut short.
+            raise InvalidInput(
+                f"{path.name} is not a readable DICOM file (empty or truncated?). "
+                f"Besides DICOM, a series folder may hold only {', '.join(sorted(ANCILLARY_SUFFIXES))} files"
+            ) from None
+        except Exception as exc:
+            raise InvalidInput(f"{path.name}: unreadable DICOM header ({type(exc).__name__}: {exc})") from None
+        if not is_image(ds=ds):
+            continue  # a DICOM object without pixels: a DICOMDIR, a structured report, ...
+        # pydicom returns a truncated file's header without complaint: a dropped end slice would still look regular.
+        if missing := [tag for tag in REQUIRED_TAGS if tag not in ds]:
+            raise InvalidInput(f"{path.name} is missing {', '.join(missing)} (truncated or incomplete image?)")
+        slices.append((path, ds))
 
     if not slices:
         raise InvalidInput(f"No DICOM images with position data in {directory.name}")
@@ -86,6 +104,18 @@ def read_series(directory: Path, *, validate: bool = True) -> SeriesInfo:
     if validate:
         validate_geometry(info=info)
     return info
+
+
+def is_ancillary(*, path: Path) -> bool:
+    """A document, picture or system file (.DS_Store and other dotfiles) filed next to the slices."""
+    name = path.name.lower()
+    return path.suffix.lower() in ANCILLARY_SUFFIXES or name in ANCILLARY_NAMES or name.startswith(".")
+
+
+def is_image(*, ds: Dataset) -> bool:
+    """Image instances must be complete slices. A file whose SOP class is unreadable counts as a broken image."""
+    sop_class = ds.get("SOPClassUID") or ds.file_meta.get("MediaStorageSOPClassUID")
+    return "Rows" in ds or sop_class is None or "Image" in sop_class.name
 
 
 def validate_geometry(*, info: SeriesInfo) -> None:
@@ -137,7 +167,12 @@ def sagittal(files: list[str], rows: int, columns: int, *, check: Callable[[], N
     for i, path in enumerate(files):
         if check is not None:
             check()
-        hu = load_hu(path=path)
+        try:
+            hu = load_hu(path=path)
+        except Exception as exc:  # e.g. pixel data cut short, which a header-only read cannot notice
+            raise InvalidInput(
+                f"{Path(path).name}: cannot decode the pixel data ({type(exc).__name__}: {exc})"
+            ) from None
         if hu.shape != (rows, columns):
             raise InvalidInput(f"{Path(path).name} has a different image size than the first slice")
         plane[i] = np.clip(hu[:, columns // 2], -32768, 32767)

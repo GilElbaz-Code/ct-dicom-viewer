@@ -4,7 +4,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Path, Query, Response
 
-from app.api.schemas import Located, Series
+from app.api.schemas import BeforeId, Limit, Located, Series
 from app.services import viewer
 from app.types import LocatedRecord, SeriesRecord
 
@@ -21,8 +21,12 @@ PNG: dict[int | str, dict] = {200: {"content": {"image/png": {}}}}  # documents 
 def search(
     max_slice_thickness: Annotated[float | None, Query(gt=0, description="Only series thinner than this (mm)")] = None,
     description: Annotated[str | None, Query(description="Text in the study or series description")] = None,
+    before_id: BeforeId = None,
+    limit: Limit = 100,
 ) -> list[SeriesRecord]:
-    return viewer.search(max_slice_thickness=max_slice_thickness, description=description)
+    return viewer.search(
+        max_slice_thickness=max_slice_thickness, description=description, before_id=before_id, limit=limit
+    )
 
 
 @router.get("/{series_id}", response_model=Series)

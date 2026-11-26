@@ -55,35 +55,23 @@ the same tag to production. Dependabot or Renovate keeps dependencies current, a
 
 ## Deploying on Kubernetes or OpenShift
 
-The compose services map one to one onto a Helm chart, with values per environment (image tag, replicas, hosts):
-
-* `api`, `worker`, `relay` and `web` become Deployments of the same images (one `relay` replica is enough; extra ones are safe). An Ingress (a Route on OpenShift) exposes
-  `web` and terminates TLS. Workers autoscale on queue length:
-  [`deploy/k8s/worker-autoscaling.yaml`](../deploy/k8s/worker-autoscaling.yaml) is a worker Deployment plus a KEDA
-  ScaledObject that targets one worker per two waiting jobs, between 1 and 20 replicas.
-* Probes: liveness is `/api/health` for `api` and `/` for `web`. Readiness for `api` needs a separate endpoint
-  that also runs `SELECT 1` and a Redis `PING`, because `/api/health` never touches either. Workers renew database leases; the relay recovers jobs whose lease expires.
-* PostgreSQL is a managed database or an operator (CloudNativePG), not a hand-written StatefulSet. The schema
-  runs as a Job before each release, instead of from initdb.
-* Redis is managed, or a StatefulSet with a PersistentVolumeClaim.
-* DICOM data comes from a ReadOnlyMany volume (NFS or CephFS) mounted at `/data` in `api` and `worker`.
-* Settings live in a ConfigMap. Passwords live in Secrets, synced from Vault by the External Secrets Operator.
-  Keycloak login is handled by oauth2-proxy in front of `web`.
-* OpenShift runs containers under a random user ID. The backend image already runs as non-root and writes
-  nothing to disk, so it works unchanged. The web image would switch to `nginxinc/nginx-unprivileged`, because
-  stock nginx needs root to write its cache and PID file.
+The compose services map one to one onto Deployments of the same images, behind an Ingress (a Route on
+OpenShift), with PostgreSQL and Redis as managed services. Workers can autoscale on queue length with KEDA.
+Details, including probes, secrets and OpenShift's random user IDs, are in
+[`deploy/k8s/README.md`](../deploy/k8s/README.md).
 
 ## Scaling
 
-Every service except PostgreSQL holds no state, so each one scales by adding replicas. Locally:
-`docker compose up -d --scale worker=6`.
+`api`, `worker`, `relay` and `web` hold no state, so they scale by adding replicas. Locally:
+`docker compose up -d --scale worker=6`. PostgreSQL and Redis hold state and do not: each is one primary that
+scales vertically, or becomes a managed service.
 
 | Component | How it scales | Where the limit is, and the next step |
 |---|---|---|
-| `worker` | One job at a time per worker. Jobs are claimed in PostgreSQL (`claim_job` succeeds once), so extra replicas never process a job twice. On Kubernetes, KEDA adds workers as the queue grows. | PostgreSQL connections: each running job opens its own pool (up to 10 connections) in the process RQ forks for it. Above ~20 workers, put PgBouncer in front. Shared DICOM storage bandwidth comes next. |
+| `worker` | One job at a time per worker. Jobs are claimed in PostgreSQL (`claim_job` succeeds once), so extra replicas never process a job twice. On Kubernetes, KEDA adds workers as the queue grows ([deploy/k8s](../deploy/k8s/README.md)). | PostgreSQL connections: each running job opens its own pool (up to 10 connections) in the process RQ forks for it. Above ~20 workers, put PgBouncer in front. Shared DICOM storage bandwidth comes next. |
 | `api` | Stateless replicas behind nginx or an Ingress. | Rendering PNGs uses CPU in one Python process per container. Add replicas, or `uvicorn --workers`. Image URLs are versioned (`v=updated_at`), so a CDN could cache them. |
 | `relay` | One is enough: each pass publishes up to 100 jobs every 2 s, about 50 jobs per second. | Extra replicas are safe, because `FOR UPDATE SKIP LOCKED` gives each relay different rows. |
-| `redis` | Holds only job IDs waiting to be picked up. | Not a bottleneck at this load. Losing it loses nothing, because the relay republishes from the outbox. |
+| `redis` | One stateful primary: the waiting job IDs, saved to disk (append-only file). Replicas add failover (Sentinel or a managed Redis), not capacity, since RQ uses the primary. | Not a bottleneck at this load. If its data is lost, the relay republishes queued jobs from the outbox, so no accepted job is lost; RQ's own failed-job registry is. |
 | `db` | Vertical first. A managed PostgreSQL with a read replica for search. | Sagittal planes (~350 KB each) in `bytea` move to object storage at about a million series, and "description contains" search needs a `pg_trgm` index. See the README. |
 
 ## Secrets

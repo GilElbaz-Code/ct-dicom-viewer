@@ -10,8 +10,12 @@ from app.services import dicom
 from app.types import LocatedRecord, SeriesRecord
 
 
-def search(max_slice_thickness: float | None, description: str | None) -> list[SeriesRecord]:
-    return repository.search_series(max_slice_thickness=max_slice_thickness, description=description)
+def search(
+    max_slice_thickness: float | None, description: str | None, before_id: int | None, limit: int
+) -> list[SeriesRecord]:
+    return repository.search_series(
+        max_slice_thickness=max_slice_thickness, description=description, before_id=before_id, limit=limit
+    )
 
 
 def get_series(series_id: int) -> SeriesRecord:
@@ -57,8 +61,12 @@ def axial_png(series_id: int, index: int, width: float, level: float) -> bytes:
     path = repository.get_slice_file(series_id=series_id, index=index)
     if path is None:
         raise NotFound("Series or slice not found")
+    # PixelSpacing is [between rows, between columns] in mm. Keep the rows and stretch the width to match,
+    # so a non-square pixel is not drawn square. Validation guarantees two positive values for analyzed series.
+    row_mm, column_mm = series["pixel_spacing"]
+    size = (round(series["columns"] * column_mm / row_mm), series["rows"]) if row_mm != column_mm else None
     try:
-        return dicom.window_png(hu=dicom.load_hu(path=path), width=width, level=level)
+        return dicom.window_png(hu=dicom.load_hu(path=path), width=width, level=level, size=size)
     except FileNotFoundError:
         raise NotFound(f"The slice file is gone: {path}") from None
 

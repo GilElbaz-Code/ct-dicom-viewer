@@ -30,11 +30,12 @@ def run(job_id: int) -> None:
             directory = resolve_inside_data_dir(raw=claim.path)
             info = dicom.read_series(directory=directory, validate=False)
             lease.check()
-            series_id = repository.save_series_metadata(claim=claim, series={**asdict(info), "source_path": claim.path})
+            series = {**asdict(info), "source_path": claim.path}
+            repository.save_series_metadata(claim=claim, series=series)
             dicom.validate_geometry(info=info)
             plane = dicom.sagittal(files=info.files, rows=info.rows, columns=info.columns, check=lease.check)
             lease.check()
-            repository.save_analysis_and_finish_job(claim=claim, series_id=series_id, sagittal=plane.tobytes())
+            repository.save_analysis_and_finish_job(claim=claim, series=series, sagittal=plane.tobytes())
         except LeaseLost:
             logger.warning("Discarding stale attempt for job %s", job_id)
         except Exception as exc:
