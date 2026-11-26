@@ -16,7 +16,7 @@ import {
 } from "@mantine/core";
 import { useDebouncedValue } from "@mantine/hooks";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { type SubmitEvent, type ReactNode, useState } from "react";
+import { type MouseEvent, type SubmitEvent, type ReactNode, useState } from "react";
 import { type Series, type SliceTarget, api, axialUrl, sagittalUrl } from "../api";
 
 const PRESETS = [
@@ -107,6 +107,13 @@ function SeriesView({ series, picker }: { series: Series; picker: ReactNode }) {
   // Sagittal image rows run from the highest z (top) to the lowest; the line goes through the middle of the slice's row.
   const lineTop = slice ? ((slice.num_slices - 1 - slice.index + 0.5) / slice.num_slices) * 100 : null;
 
+  // The inverse of lineTop: the clicked image row becomes the slice index (the slider stays the keyboard path).
+  function pickSlice(event: MouseEvent<HTMLDivElement>) {
+    const box = event.currentTarget.getBoundingClientRect();
+    const row = Math.floor(((event.clientY - box.top) / box.height) * series.num_slices);
+    setTarget({ index: Math.min(series.num_slices - 1, Math.max(0, series.num_slices - 1 - row)) });
+  }
+
   // Every control sits in one toolbar row, so the images and the details column both fit the window height.
   return (
     <Stack gap="md">
@@ -191,8 +198,8 @@ function SeriesView({ series, picker }: { series: Series; picker: ReactNode }) {
               </>
             )}
           </Panel>
-          <Panel title="Sagittal, through the middle of the volume">
-            <div className="image">
+          <Panel title="Sagittal, mid-volume · click to pick a slice">
+            <div className="image pickable" onClick={pickSlice}>
               <img src={sagittalUrl(series, shown.width, shown.level)} alt="Sagittal view with the chosen slice marked" />
               {slice && lineTop !== null && (
                 <div className="slice-line" style={{ top: `${lineTop}%` }}>
