@@ -49,7 +49,7 @@ services:
 
   worker:
     <<: *backend
-    command: ["rq", "worker", "--url", "redis://redis:6379/0"]
+    command: ["sh", "-c", "exec rq worker --url \"$$REDIS_URL\""]  # $$: expanded by sh in the container, not by compose
     deploy:
       replicas: 2  # two series are processed at the same time
 

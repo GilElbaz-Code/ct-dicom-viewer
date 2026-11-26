@@ -33,15 +33,14 @@ All services share the compose network and find each other by service name:
 * `web`'s nginx sends `/api/*` to `http://api:8000` ([`nginx.conf`](../frontend/nginx.conf)), so the browser sees
   a single origin (no CORS). nginx looks `api` up through Docker's DNS (`resolver 127.0.0.11`) on each
   request, so a recreated `api` container with a new IP is found without restarting `web`.
-* `api` and `worker` reach PostgreSQL at `db:5432` and Redis at `redis:6379` through `DATABASE_URL` and
-  `REDIS_URL`.
+* `api`, `worker` and `relay` reach PostgreSQL at `db:5432` and Redis at `redis:6379` through `DATABASE_URL` and
+  `REDIS_URL`, set once in the compose file's shared backend block.
 * Start order follows the healthchecks: `db` and `redis` must be healthy before the backend services start, and
   `web` waits for `api`'s `/api/health`.
 
 ## CI pipeline
 
-The repository has no pipeline, since the app is reviewed by running it locally. On GitHub Actions (or GitLab
-CI) I would run these on every pull request:
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs three parallel jobs on every push and pull request:
 
 1. **backend:** `uv sync --frozen`, `ruff check`, `ruff format --check`, then `pytest` with a PostgreSQL
    service container and `TEST_DATABASE_URL` set, so the API tests run as well as the unit tests (which use
@@ -49,7 +48,7 @@ CI) I would run these on every pull request:
 2. **frontend:** `npm ci` and `npm run build`, which type-checks before bundling.
 3. **images:** `docker compose build`, so a broken Dockerfile fails the pull request.
 
-On `main`, CD pushes both images to a registry tagged with the commit SHA and deploys that tag to staging
+What I would add for a deployed service: on `main`, CD pushes both images to a registry tagged with the commit SHA and deploys that tag to staging
 (`helm upgrade --install`). It runs a smoke test there (index a synthetic series, fetch both images), then promotes
 the same tag to production. Dependabot or Renovate keeps dependencies current, and Trivy scans the images.
 
@@ -69,7 +68,7 @@ scales vertically, or becomes a managed service.
 | Component | How it scales | Where the limit is, and the next step |
 |---|---|---|
 | `worker` | One job at a time per worker. Jobs are claimed in PostgreSQL (`claim_job` succeeds once), so extra replicas never process a job twice. On Kubernetes, KEDA adds workers as the queue grows ([deploy/k8s](../deploy/k8s/README.md)). | PostgreSQL connections: each running job opens its own pool (up to 10 connections) in the process RQ forks for it. Above ~20 workers, put PgBouncer in front. Shared DICOM storage bandwidth comes next. |
-| `api` | Stateless replicas behind nginx or an Ingress. | Rendering PNGs uses CPU in one Python process per container. Add replicas, or `uvicorn --workers`. Image URLs are versioned (`v=updated_at`), so a CDN could cache them. |
+| `api` | Stateless replicas behind nginx or an Ingress. | Rendering PNGs uses CPU in one Python process per container. Add replicas, or `uvicorn --workers`. Image URLs are versioned (`v=updated_at`), so once the API sends a long `Cache-Control` on PNGs (it sends none today), a CDN or the browser could cache them safely. |
 | `relay` | One is enough: each pass publishes up to 100 jobs every 2 s, about 50 jobs per second. | Extra replicas are safe, because `FOR UPDATE SKIP LOCKED` gives each relay different rows. |
 | `redis` | One stateful primary: the waiting job IDs, saved to disk (append-only file). Replicas add failover (Sentinel or a managed Redis), not capacity, since RQ uses the primary. | Not a bottleneck at this load. If its data is lost, the relay republishes queued jobs from the outbox, so no accepted job is lost; RQ's own failed-job registry is. |
 | `db` | Vertical first. A managed PostgreSQL with a read replica for search. | Sagittal planes (~350 KB each) in `bytea` move to object storage at about a million series, and "description contains" search needs a `pg_trgm` index. See the README. |
@@ -79,7 +78,8 @@ scales vertically, or becomes a managed service.
 * Locally, the only secret is `POSTGRES_PASSWORD`. It goes in `.env`, which is git-ignored; `.env.example`
   documents it. Compose has a development default so a clean checkout starts with no setup.
 * Images contain no secrets: everything comes from the environment at run time.
-* In CI they would be the CI system's encrypted secrets. Deploying to a cloud would use OIDC federation instead of
+* CI needs none today: its PostgreSQL is a throwaway service container. Registry or cloud credentials would be the
+  CI system's encrypted secrets. Deploying to a cloud would use OIDC federation instead of
   long-lived keys.
 * In production, secrets come from a secret manager (AWS Secrets Manager, Vault, or Kubernetes Secrets) as
   environment variables or mounted files, and are rotated there.

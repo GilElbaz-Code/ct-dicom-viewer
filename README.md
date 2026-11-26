@@ -40,7 +40,9 @@ Needs only Docker with Compose v2 (Docker Desktop, or Docker Engine 24+).
    [`examples/sample_batch.csv`](examples/sample_batch.csv). Each series takes a few seconds.
    [`examples/batch_with_errors.csv`](examples/batch_with_errors.csv) shows how failed rows are reported.
 4. On **Viewer**, pick a series and enter a location in mm or a slice index. Change the window with the presets
-   or the width/level fields (default soft tissue, 400/40). **Search** runs queries across studies.
+   or the width/level fields (default soft tissue, 400/40). **Search** runs queries across studies. The samples
+   are 2.0 and 2.5 mm thick, so *thinner than 1.5 mm* correctly finds nothing; try 2.2 mm, or the description
+   `chest` (a case-insensitive match on the study or series description).
 
 Stop with `docker compose down`. Add `-v` to also delete the database.
 More workers process more series at once: `docker compose up -d --scale worker=6`. For autoscaling on
