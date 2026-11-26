@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     max_attempts: int = Field(default=3, ge=1)
     dispatch_interval_seconds: int = Field(default=60, ge=1)
     retry_delay_seconds: int = Field(default=30, ge=1)
+    idempotency_key_hours: int = Field(default=24, ge=1)
 
 
 settings = Settings()

@@ -57,7 +57,9 @@ the same tag to production. Dependabot or Renovate keeps dependencies current, a
 The compose services map one to one onto a Helm chart, with values per environment (image tag, replicas, hosts):
 
 * `api`, `worker`, `relay` and `web` become Deployments of the same images (one `relay` replica is enough; extra ones are safe). An Ingress (a Route on OpenShift) exposes
-  `web` and terminates TLS. Workers can scale on queue length (KEDA reading the Redis list).
+  `web` and terminates TLS. Workers autoscale on queue length:
+  [`deploy/k8s/worker-autoscaling.yaml`](../deploy/k8s/worker-autoscaling.yaml) is a worker Deployment plus a KEDA
+  ScaledObject that targets one worker per two waiting jobs, between 1 and 20 replicas.
 * Probes: liveness is `/api/health` for `api` and `/` for `web`. Readiness for `api` needs a separate endpoint
   that also runs `SELECT 1` and a Redis `PING`, because `/api/health` never touches either. Workers renew database leases; the relay recovers jobs whose lease expires.
 * PostgreSQL is a managed database or an operator (CloudNativePG), not a hand-written StatefulSet. The schema
@@ -69,6 +71,19 @@ The compose services map one to one onto a Helm chart, with values per environme
 * OpenShift runs containers under a random user ID. The backend image already runs as non-root and writes
   nothing to disk, so it works unchanged. The web image would switch to `nginxinc/nginx-unprivileged`, because
   stock nginx needs root to write its cache and PID file.
+
+## Scaling
+
+Every service except PostgreSQL holds no state, so each one scales by adding replicas. Locally:
+`docker compose up -d --scale worker=6`.
+
+| Component | How it scales | Where the limit is, and the next step |
+|---|---|---|
+| `worker` | One job at a time per worker. Jobs are claimed in PostgreSQL (`claim_job` succeeds once), so extra replicas never process a job twice. On Kubernetes, KEDA adds workers as the queue grows. | PostgreSQL connections: each running job opens its own pool (up to 10 connections) in the process RQ forks for it. Above ~20 workers, put PgBouncer in front. Shared DICOM storage bandwidth comes next. |
+| `api` | Stateless replicas behind nginx or an Ingress. | Rendering PNGs uses CPU in one Python process per container. Add replicas, or `uvicorn --workers`. Image URLs are versioned (`v=updated_at`), so a CDN could cache them. |
+| `relay` | One is enough: each pass publishes up to 100 jobs every 2 s, about 50 jobs per second. | Extra replicas are safe, because `FOR UPDATE SKIP LOCKED` gives each relay different rows. |
+| `redis` | Holds only job IDs waiting to be picked up. | Not a bottleneck at this load. Losing it loses nothing, because the relay republishes from the outbox. |
+| `db` | Vertical first. A managed PostgreSQL with a read replica for search. | Sagittal planes (~350 KB each) in `bytea` move to object storage at about a million series, and "description contains" search needs a `pg_trgm` index. See the README. |
 
 ## Secrets
 

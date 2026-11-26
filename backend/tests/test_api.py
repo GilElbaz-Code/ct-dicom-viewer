@@ -6,6 +6,7 @@ The RQ queue is replaced by one that runs each task immediately, so no Redis or 
 
 import os
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from uuid import uuid4
 
@@ -39,7 +40,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "data_dir", tmp_path)
     pool.cache_clear()
     with pool().connection() as conn:
-        conn.execute("DROP TABLE IF EXISTS job_outbox, jobs, series CASCADE")
+        conn.execute("DROP TABLE IF EXISTS idempotency_keys, job_outbox, jobs, series CASCADE")
         conn.execute((Path(__file__).parents[1] / "schema.sql").read_text())
     yield TestClient(app)
     pool().close()
@@ -90,6 +91,51 @@ def test_a_duplicate_delivery_of_a_finished_job_is_skipped(client, make_series, 
     ingest.run(job_id)
     [job] = client.get("/api/jobs").json()
     assert (job["status"], job["error"]) == ("done", None)
+
+
+def test_a_repeated_idempotency_key_returns_the_original_job(client):
+    first = client.post("/api/jobs", json={"path": "chest"}, headers={"Idempotency-Key": "k1"})
+    again = client.post("/api/jobs", json={"path": "chest"}, headers={"Idempotency-Key": "k1"})
+    assert first.status_code == again.status_code == 201
+    assert again.json()["id"] == first.json()["id"]
+    assert len(client.get("/api/jobs").json()) == 1
+
+
+def test_an_idempotency_key_reused_for_another_request_is_rejected(client):
+    client.post("/api/jobs", json={"path": "chest"}, headers={"Idempotency-Key": "k1"})
+    response = client.post("/api/jobs", json={"path": "head"}, headers={"Idempotency-Key": "k1"})
+    assert response.status_code == 422
+    assert "different request" in response.json()["detail"]
+    assert len(client.get("/api/jobs").json()) == 1
+
+
+def test_a_repeated_batch_returns_the_same_jobs_and_batch(client):
+    csv = {"file": ("batch.csv", b"path\na\nb\n")}
+    first = client.post("/api/batches", files=csv, headers={"Idempotency-Key": "batch-1"}).json()
+    again = client.post("/api/batches", files=csv, headers={"Idempotency-Key": "batch-1"}).json()
+    assert [job["id"] for job in again] == [job["id"] for job in first]
+    assert again[0]["batch_id"] == first[0]["batch_id"]
+    assert len(client.get("/api/jobs").json()) == 2
+
+
+def test_concurrent_requests_with_one_key_create_one_job(client):
+    # Eight threads race on one key; PostgreSQL makes the losers wait for the winner's commit, then replay it.
+    def create(_):
+        return repository.create_jobs(paths=["chest"], batch_id=None, idempotency_key="race")[0]["id"]
+
+    with ThreadPoolExecutor(max_workers=8) as threads:
+        ids = set(threads.map(create, range(8)))
+    assert len(ids) == 1
+    assert len(client.get("/api/jobs").json()) == 1
+
+
+def test_expired_idempotency_keys_are_deleted_so_the_key_can_be_reused(client):
+    first = client.post("/api/jobs", json={"path": "chest"}, headers={"Idempotency-Key": "k1"}).json()
+    with pool().connection() as conn:
+        conn.execute("UPDATE idempotency_keys SET created_at = now() - interval '25 hours'")
+    assert repository.delete_expired_idempotency_keys() == 1
+    again = client.post("/api/jobs", json={"path": "chest"}, headers={"Idempotency-Key": "k1"}).json()
+    assert again["id"] != first["id"]
 
 
 def test_queue_outage_keeps_accepted_jobs_queued(client):

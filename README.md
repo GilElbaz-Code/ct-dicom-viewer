@@ -43,6 +43,8 @@ Needs only Docker with Compose v2 (Docker Desktop, or Docker Engine 24+).
    or the width/level fields (default soft tissue, 400/40). **Search** runs queries across studies.
 
 Stop with `docker compose down`. Add `-v` to also delete the database.
+More workers process more series at once: `docker compose up -d --scale worker=6`. For autoscaling on
+Kubernetes, see [docs/devops.md](docs/devops.md#scaling).
 
 ## Why PostgreSQL
 

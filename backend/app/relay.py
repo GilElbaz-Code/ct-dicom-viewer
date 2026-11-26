@@ -5,7 +5,7 @@ import signal
 from threading import Event
 from types import FrameType
 
-from app.db import dispatch
+from app.db import dispatch, repository
 from app.db.pool import close_pool
 from app.services import jobs
 
@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 def tick() -> None:
     dispatch.recover_expired()
     dispatch.publish_due(publish=jobs.publish)
+    repository.delete_expired_idempotency_keys()
 
 
 def main() -> None:

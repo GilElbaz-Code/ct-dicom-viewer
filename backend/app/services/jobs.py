@@ -27,12 +27,12 @@ def publish(job_id: int) -> None:
     queue().enqueue(ingest.run, job_id, job_timeout=settings.job_timeout_seconds, result_ttl=0, failure_ttl=86400)
 
 
-def submit(paths: list[str], batch_id: UUID | None = None) -> list[JobRecord]:
-    return repository.create_jobs(paths=paths, batch_id=batch_id)
+def submit(paths: list[str], batch_id: UUID | None = None, idempotency_key: str | None = None) -> list[JobRecord]:
+    return repository.create_jobs(paths=paths, batch_id=batch_id, idempotency_key=idempotency_key)
 
 
-def submit_csv(content: bytes) -> list[JobRecord]:
-    return submit(paths=parse_csv(content=content), batch_id=uuid4())
+def submit_csv(content: bytes, idempotency_key: str | None = None) -> list[JobRecord]:
+    return submit(paths=parse_csv(content=content), batch_id=uuid4(), idempotency_key=idempotency_key)
 
 
 def parse_csv(content: bytes) -> list[str]:

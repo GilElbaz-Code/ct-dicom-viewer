@@ -54,3 +54,11 @@ CREATE TABLE job_outbox (
 );
 
 CREATE INDEX job_outbox_due_idx ON job_outbox (next_dispatch_at);
+
+-- Idempotent submission: repeating a request with the same Idempotency-Key header returns the jobs it created.
+CREATE TABLE idempotency_keys (
+    key         text PRIMARY KEY,
+    paths       text[] NOT NULL,                 -- the original request, so a key reused for another one is rejected
+    job_ids     bigint[] NOT NULL DEFAULT '{}',  -- filled in the same transaction that creates the jobs
+    created_at  timestamptz NOT NULL DEFAULT now()  -- the relay deletes keys after IDEMPOTENCY_KEY_HOURS
+);

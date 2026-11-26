@@ -9,7 +9,7 @@ from psycopg.rows import DictRow
 
 from app.config import settings
 from app.db.pool import pool
-from app.errors import LeaseLost
+from app.errors import InvalidInput, LeaseLost
 from app.types import JobRecord, PositionRecord, SagittalRecord, SeriesRecord
 
 JOB_COLUMNS = "id, path, batch_id, status, error, series_id, created_at, finished_at, attempt_count, stage"
@@ -26,8 +26,17 @@ SERIES_COLUMNS = """
 # --- jobs ---------------------------------------------------------------------------------------
 
 
-def create_jobs(paths: list[str], batch_id: UUID | None) -> list[JobRecord]:
+def create_jobs(paths: list[str], batch_id: UUID | None, idempotency_key: str | None = None) -> list[JobRecord]:
+    """Jobs and their outbox rows commit together. A repeated idempotency key returns the jobs it created."""
     with pool().connection() as conn:
+        if idempotency_key is not None:
+            # A concurrent request holding the same key makes this INSERT wait until it commits, then do nothing.
+            claimed = conn.execute(
+                "INSERT INTO idempotency_keys (key, paths) VALUES (%s, %s) ON CONFLICT (key) DO NOTHING RETURNING key",
+                (idempotency_key, paths),
+            ).fetchone()
+            if claimed is None:
+                return replay(conn=conn, idempotency_key=idempotency_key, paths=paths)
         rows = conn.execute(
             f"INSERT INTO jobs (path, batch_id) SELECT unnest(%s::text[]), %s RETURNING {JOB_COLUMNS}",
             (paths, batch_id),
@@ -36,7 +45,27 @@ def create_jobs(paths: list[str], batch_id: UUID | None) -> list[JobRecord]:
             "INSERT INTO job_outbox(job_id) SELECT unnest(%s::bigint[])",
             ([row["id"] for row in rows],),
         )
+        if idempotency_key is not None:
+            conn.execute(
+                "UPDATE idempotency_keys SET job_ids = %s WHERE key = %s",
+                ([row["id"] for row in rows], idempotency_key),
+            )
         return rows
+
+
+def replay(*, conn: Connection[DictRow], idempotency_key: str, paths: list[str]) -> list[JobRecord]:
+    row = conn.execute("SELECT paths, job_ids FROM idempotency_keys WHERE key = %s", (idempotency_key,)).fetchone()
+    if row["paths"] != paths:
+        raise InvalidInput("This Idempotency-Key was already used for a different request")
+    return conn.execute(f"SELECT {JOB_COLUMNS} FROM jobs WHERE id = ANY(%s) ORDER BY id", (row["job_ids"],)).fetchall()
+
+
+def delete_expired_idempotency_keys() -> int:
+    with pool().connection() as conn:
+        return conn.execute(
+            "DELETE FROM idempotency_keys WHERE created_at < clock_timestamp() - %s * interval '1 hour'",
+            (settings.idempotency_key_hours,),
+        ).rowcount
 
 
 def list_jobs(batch_id: UUID | None, limit: int = 200) -> list[JobRecord]:

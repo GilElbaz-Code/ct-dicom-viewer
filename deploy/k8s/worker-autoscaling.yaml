@@ -1,0 +1,49 @@
+# Worker autoscaling on Kubernetes with KEDA (https://keda.sh). An example for production; docker compose does not use it.
+# Workers hold no state and claim jobs through PostgreSQL, so any number of replicas is safe.
+# Assumes a ConfigMap `ct-viewer-config` (DATABASE_URL host, REDIS_URL, DATA_DIR), a Secret `ct-viewer-secrets`
+# (the database password) and a ReadOnlyMany claim `dicom-library` holding the DICOM files.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ct-viewer-worker
+spec:
+  selector:
+    matchLabels: { app: ct-viewer-worker }
+  template:
+    metadata:
+      labels: { app: ct-viewer-worker }
+    spec:
+      # Scale-in sends SIGTERM. RQ then finishes its current job (up to the 30-minute job timeout) before exiting.
+      # A pod killed anyway loses only its lease: the relay requeues the job after the lease expires.
+      terminationGracePeriodSeconds: 1800
+      containers:
+        - name: worker
+          image: ghcr.io/OWNER/ct-viewer-backend:COMMIT_SHA  # the same image as the API, tagged by CI
+          command: ["rq", "worker", "--url", "$(REDIS_URL)"]
+          envFrom:
+            - configMapRef: { name: ct-viewer-config }
+            - secretRef: { name: ct-viewer-secrets }
+          resources:
+            requests: { cpu: 500m, memory: 512Mi }  # one series at a time: one decoded slice plus the sagittal plane
+            limits: { memory: 1Gi }
+          volumeMounts:
+            - { name: dicom, mountPath: /data, readOnly: true }
+      volumes:
+        - name: dicom
+          persistentVolumeClaim: { claimName: dicom-library, readOnly: true }
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: ct-viewer-worker
+spec:
+  scaleTargetRef: { name: ct-viewer-worker }
+  minReplicaCount: 1    # 0 saves cost but adds a cold start to the first job
+  maxReplicaCount: 20   # each worker holds PostgreSQL connections; put PgBouncer in front before going higher
+  cooldownPeriod: 300   # wait 5 minutes of short queues before scaling in
+  triggers:
+    - type: redis
+      metadata:
+        address: ct-viewer-redis:6379
+        listName: rq:queue:default  # the Redis list RQ keeps its waiting jobs in
+        listLength: "2"             # target: one worker per 2 waiting jobs
