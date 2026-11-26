@@ -39,7 +39,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "data_dir", tmp_path)
     pool.cache_clear()
     with pool().connection() as conn:
-        conn.execute("DROP TABLE IF EXISTS job_outbox, upload_sessions, jobs, series CASCADE")
+        conn.execute("DROP TABLE IF EXISTS job_outbox, jobs, series CASCADE")
         conn.execute((Path(__file__).parents[1] / "schema.sql").read_text())
     yield TestClient(app)
     pool().close()

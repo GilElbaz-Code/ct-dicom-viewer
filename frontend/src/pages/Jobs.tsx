@@ -16,7 +16,6 @@ import {
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type SubmitEvent, useState } from "react";
 import { type JobStatus, api } from "../api";
-import { UploadDirectory } from "../components/UploadDirectory";
 
 const STATUS: Record<JobStatus, { label: string; color: string }> = {
   queued: { label: "Queued", color: "gray" },
@@ -68,7 +67,6 @@ export function Jobs({ onOpen }: { onOpen: (id: number) => void }) {
   return (
     <Stack gap="lg">
       {error && <Alert color="red">{error.message}</Alert>}
-      <UploadDirectory onAccepted={() => { setBatchId(null); refreshJobs(); }} />
 
       <SimpleGrid cols={{ base: 1, md: 2 }} spacing="lg">
         <Paper withBorder p="md">

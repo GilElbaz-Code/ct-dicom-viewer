@@ -15,21 +15,6 @@ export interface Job {
   stage: string;
 }
 
-export interface UploadFileSpec {
-  name: string;
-  size: number;
-  sha256: string;
-}
-
-export interface UploadSession {
-  id: string;
-  name: string;
-  status: "uploading" | "complete";
-  job_id: number | null;
-  expires_at: string;
-  files: (UploadFileSpec & { uploaded: boolean; form: { url: string; fields: Record<string, string> } | null })[];
-}
-
 export interface Series {
   id: number;
   series_uid: string;
@@ -81,11 +66,6 @@ const query = (params: Record<string, string | number | undefined>) =>
   ).toString();
 
 export const api = {
-  createUpload: (name: string, files: UploadFileSpec[]) => request<UploadSession>("/uploads", {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, files }),
-  }),
-  uploadSession: (id: string) => request<UploadSession>(`/uploads/${id}`),
-  completeUpload: (id: string) => request<Job>(`/uploads/${id}/complete`, { method: "POST" }),
   searchSeries: (filters: { max_slice_thickness?: number; description?: string }) =>
     request<Series[]>(`/series?${query(filters)}`),
   getSeries: (id: number) => request<Series>(`/series/${id}`),

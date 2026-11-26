@@ -13,7 +13,6 @@ from pydicom.dataset import Dataset
 from pydicom.errors import InvalidDicomError
 from pydicom.pixels import apply_modality_lut
 
-from app.services import storage
 from app.services.errors import InvalidInput
 
 # A file counts as a slice only if it has the geometry the viewer needs.
@@ -128,11 +127,7 @@ def validate_geometry(*, info: SeriesInfo) -> None:
 
 def load_hu(path: str) -> np.ndarray:
     """One slice in Hounsfield units (RescaleSlope and RescaleIntercept applied)."""
-    if path.startswith("s3://"):
-        with storage.read_object(reference=path) as content:
-            ds = pydicom.dcmread(fp=content)
-    else:
-        ds = pydicom.dcmread(fp=path)
+    ds = pydicom.dcmread(fp=path)
     return apply_modality_lut(arr=ds.pixel_array, ds=ds)
 
 

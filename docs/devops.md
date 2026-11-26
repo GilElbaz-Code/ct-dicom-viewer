@@ -2,7 +2,7 @@
 
 ## How the images are built, and why
 
-* **[`backend/Dockerfile`](../backend/Dockerfile)** builds one image for the API, worker, relay and `storage-init`; the compose
+* **[`backend/Dockerfile`](../backend/Dockerfile)** builds one image for the API, worker and relay; the compose
   `command` picks the role, so they always run the same code and dependencies. It starts from
   `python:3.13-slim` and copies in the `uv` binary. `uv sync --frozen` installs exactly the versions in `uv.lock`
   (reproducible builds). `pyproject.toml` and `uv.lock` are copied before the code, so the dependency layer is
@@ -20,7 +20,6 @@
 | Schema | `backend/schema.sql`, mounted into `/docker-entrypoint-initdb.d` | Applied once, when `pgdata` is empty |
 | Redis queue | Named volume `redisdata`, append-only file on | Queued tasks survive a restart |
 | Analysis output (sagittal planes) | In PostgreSQL, on the series row | Same as the database |
-| Browser uploads | MinIO (built from a pinned release in [`storage/Dockerfile`](../storage/Dockerfile)), named volume `objectdata`; bucket created by the one-shot `storage-init` | Sealed series are kept; unfinished uploads are deleted by the relay after 24 hours |
 
 The `api`, `worker`, `relay` and `web` containers hold no state, so they can be rebuilt or replaced at any time. In
 production the database would be a managed PostgreSQL with backups, Redis a managed instance, and DICOM in object
@@ -35,9 +34,7 @@ All services share the compose network and find each other by service name:
   a single origin (no CORS).
 * `api` and `worker` reach PostgreSQL at `db:5432` and Redis at `redis:6379` through `DATABASE_URL` and
   `REDIS_URL`.
-* The browser uploads files straight to MinIO on `127.0.0.1:9000` with presigned POSTs (`S3_PUBLIC_ENDPOINT`);
-  MinIO's CORS origins come from `MINIO_API_CORS_ALLOW_ORIGIN`. The backend reaches it at `storage:9000`.
-* Start order follows the healthchecks: `db`, `redis` and `storage-init` must succeed before the backend services start, and
+* Start order follows the healthchecks: `db` and `redis` must be healthy before the backend services start, and
   `web` waits for `api`'s `/api/health`.
 
 ## CI pipeline
@@ -75,10 +72,8 @@ The compose services map one to one onto a Helm chart, with values per environme
 
 ## Secrets
 
-* Locally, the secrets are `POSTGRES_PASSWORD` and the MinIO credentials `S3_ACCESS_KEY` / `S3_SECRET_KEY`.
-  They go in `.env`, which is git-ignored; `.env.example` documents them. Compose has development defaults so a
-  clean checkout starts with no setup. Locally the backend uses MinIO's root user. In production it would get its
-  own access key, limited to the `ct-studies` bucket.
+* Locally, the only secret is `POSTGRES_PASSWORD`. It goes in `.env`, which is git-ignored; `.env.example`
+  documents it. Compose has a development default so a clean checkout starts with no setup.
 * Images contain no secrets: everything comes from the environment at run time.
 * In CI they would be the CI system's encrypted secrets. Deploying to a cloud would use OIDC federation instead of
   long-lived keys.

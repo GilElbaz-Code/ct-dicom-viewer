@@ -7,7 +7,7 @@ from types import FrameType
 
 from app.db import dispatch
 from app.db.pool import close_pool
-from app.services import jobs, uploads
+from app.services import jobs
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +15,6 @@ logger = logging.getLogger(__name__)
 def tick() -> None:
     dispatch.recover_expired()
     dispatch.publish_due(publish=jobs.publish)
-    uploads.cleanup_expired()
 
 
 def main() -> None:

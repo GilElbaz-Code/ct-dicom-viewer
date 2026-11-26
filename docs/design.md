@@ -234,23 +234,22 @@ notes; relay, lease and upload monitoring described here are target additions.
 
 This inventory describes the current implementation. Backend tests run against real PostgreSQL and cover metadata
 retention, the viewer APIs, concurrent claims, stale-attempt rejection, bounded retries and relay crash recovery.
-The upload flow was checked once against the Compose MinIO build: presigned POSTs, verified completion, then the
-job run in-process and both images rendered. Automated tests do not exercise object storage; the Compose relay and
-worker processes and browser CORS were not exercised in that check.
+Part 2 reads series from the mounted data folder only. Browser upload to object storage is part of the target
+design above, not of the implementation.
 
 | Capability | Current implementation and remaining work |
 |---|---|
 | Interactive and CSV submission | Mounted folders under `data/`; CSV jobs share a batch ID, but source row numbers are not stored |
-| Browser upload | Implemented: `POST /api/uploads` stores a manifest (names, sizes, SHA-256) and returns presigned POST forms to MinIO. Completion verifies every object, copies it to a `sealed/` prefix that upload credentials cannot write, and commits the job with its outbox row. Repeated completion returns the same job; the relay deletes expired sessions' objects. Resuming requires reselecting the directory. Multipart upload of single large files is not implemented (64 MiB per-file limit) |
+| Browser upload | Not implemented: the Part 2 brief only needs a chosen DICOM directory, which the app takes from the mounted `data/` folder. Direct upload to object storage, verification and sealing stay in the target design |
 | Metadata queries | Thickness and combined description filters exist; explicit study-only/deduplicated search and pagination remain additions |
 | Metadata before analysis | Implemented: headers commit before geometry validation and analysis; output is nullable and the UI displays metadata-only entries |
 | Job history and errors | Stored in PostgreSQL with stage and attempt count; listing is limited to the newest 200 jobs without pagination |
 | Dispatch/recovery | Implemented: `job_outbox` rows commit with jobs; `python -m app.relay` publishes due rows, republishes queued jobs without progress, and recovers expired leases or attempts past the 30-minute timeout |
-| Retries and duplicate protection | Implemented: workers claim a job with a new attempt token and a renewed lease; metadata, result and status writes check both. Retryable database/storage errors back off up to three attempts; RQ retries are not used |
+| Retries and duplicate protection | Implemented: workers claim a job with a new attempt token and a renewed lease; metadata, result and status writes check both. Retryable database errors back off up to three attempts; RQ retries are not used |
 | Results | One sagittal plane currently lives on the series row (latest success wins); job-specific result records are a target addition |
-| Viewer | z/index, axial and sagittal views, marker, metadata and adjustable 400/40 windowing exist; axial slices of uploaded series are read from sealed objects; geometry validation rejects unsupported orientations and irregular spacing |
+| Viewer | z/index, axial and sagittal views, marker, metadata and adjustable 400/40 windowing exist; geometry validation rejects unsupported orientations and irregular spacing |
 | Database deliverables | `backend/schema.sql` contains the schema; `backend/migrations/` upgrades older databases; README contains the PostgreSQL rationale and million-series changes |
 | Production operations | SSO, TLS, readiness checks and relay/lease/upload monitoring are design capabilities, not local-app features |
 
-The remaining gaps (CSV row numbers, job-specific results, pagination, study-level search, operations) do not
+The remaining gaps (browser upload, CSV row numbers, job-specific results, pagination, study-level search, operations) do not
 change the architecture; each is an addition to the existing tables and endpoints.

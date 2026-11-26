@@ -7,11 +7,10 @@ Run locally with:  uv run uvicorn app.main:app --reload
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from app.api import jobs, series, uploads
+from app.api import jobs, series
 from app.db.pool import close_pool
 from app.services.errors import InvalidInput, NotFound
 
@@ -28,15 +27,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="CT DICOM Viewer API", docs_url="/api/docs", openapi_url="/api/openapi.json", lifespan=lifespan)
 app.include_router(router=jobs.router)
 app.include_router(router=series.router)
-app.include_router(router=uploads.router)
-
-
-@app.exception_handler(BotoCoreError)
-@app.exception_handler(ClientError)
-def storage_error(_: Request, exc: Exception) -> JSONResponse:
-    return JSONResponse(
-        content={"detail": "Object storage is unavailable or a file changed; retry the operation"}, status_code=503
-    )
 
 
 @app.exception_handler(NotFound)

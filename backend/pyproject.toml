@@ -16,7 +16,6 @@ dependencies = [
     "numpy",
     "pillow",
     "rq",
-    "boto3",
 ]
 
 [dependency-groups]

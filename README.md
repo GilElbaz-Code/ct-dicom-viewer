@@ -36,8 +36,7 @@ Needs only Docker with Compose v2 (Docker Desktop, or Docker Engine 24+).
    docker compose up --build -d
    ```
 
-3. Open **http://localhost:8080**. On **Jobs**, click **Index** next to each folder, upload a folder from your
-   computer, or upload
+3. Open **http://localhost:8080**. On **Jobs**, click **Index** next to each folder, or upload
    [`examples/sample_batch.csv`](examples/sample_batch.csv). Each series takes a few seconds.
    [`examples/batch_with_errors.csv`](examples/batch_with_errors.csv) shows how failed rows are reported.
 4. On **Viewer**, pick a series and enter a location in mm or a slice index. Change the window with the presets
@@ -94,13 +93,12 @@ The backend has three layers, and each only calls the one below it:
 | `backend/app/services/dicom.py` | Read and validate a folder's headers; HU conversion; sagittal; window/level to PNG |
 | `backend/app/services/ingest.py` | The background job: claim (skips duplicates) → path check → headers → sagittal → save |
 | `backend/app/services/jobs.py` | Submit folders or a CSV; `publish` puts a job ID on RQ (called by the relay) |
-| `backend/app/services/uploads.py`, `storage.py` | Upload sessions, presigned POSTs, checksum verification and sealing in MinIO |
-| `backend/app/relay.py`, `db/dispatch.py` | Outbox relay: publish committed jobs, recover expired leases, clean up expired uploads |
+| `backend/app/relay.py`, `db/dispatch.py` | Outbox relay: publish committed jobs, recover expired leases |
 | `backend/app/db/repository.py` | All SQL |
 | `backend/app/services/viewer.py` | Closest slice to a location; axial and sagittal PNGs |
 | `backend/app/api/*.py`, `main.py` | Routes, response models, error → HTTP status |
 | `backend/app/worker.py` | The RQ worker class; interrupted attempts are recovered by the relay from their database lease |
-| `docker-compose.yml` | db, redis, storage (MinIO), api, worker, relay, web |
+| `docker-compose.yml` | db, redis, api, worker, relay, web |
 | `frontend/src/api.ts` | Typed calls to the API |
 | `frontend/src/pages/Viewer.tsx`, `Jobs.tsx`, `Search.tsx` | The three screens |
 
@@ -113,8 +111,6 @@ Interactive documentation: **http://localhost:8080/api/docs**.
 | `GET /api/directories` | Folders in the data directory |
 | `POST /api/jobs` `{"path": "…"}` | Index one folder |
 | `POST /api/batches` (CSV upload) | Index every folder listed in a CSV; one job per row |
-| `POST /api/uploads` → presigned POSTs → `POST /api/uploads/{id}/complete` | Upload a folder from the browser, verify it, then index it (completion is safe to retry) |
-| `GET /api/uploads/{id}` | Which files are already uploaded, for resuming |
 | `GET /api/jobs?batch_id=` | Jobs, newest first, with the reason for each failure |
 | `GET /api/series?max_slice_thickness=1.5&description=chest` | Query across studies |
 | `GET /api/series/{id}` | Series metadata |
@@ -142,7 +138,6 @@ uv run ruff check . && uv run ruff format --check .
 uv run uvicorn app.main:app --reload      # API on :8000 (needs DATABASE_URL, REDIS_URL, DATA_DIR)
 uv run rq worker -w app.worker.Worker     # worker (Linux/macOS; RQ needs fork)
 uv run python -m app.relay                # relay: without it jobs stay queued
-uv run python -m app.services.storage     # once: create the upload bucket (uploads need the S3_* variables)
 
 cd frontend
 npm ci && npm run dev                     # UI on http://localhost:5173, forwards /api to :8000
@@ -153,8 +148,6 @@ npm ci && npm run dev                     # UI on http://localhost:5173, forward
 | `DATA_DIR` | `./data` | Host folder with the DICOM series, mounted read-only at `/data` |
 | `POSTGRES_PASSWORD` | `ctviewer` | Set it in `.env` before the first start (see `.env.example`) |
 | `WEB_PORT` | `8080` | Port of the web app, bound to localhost (the app has no login) |
-| `STORAGE_PORT`, `S3_PUBLIC_ENDPOINT` | `9000`, `http://localhost:9000` | MinIO port and the address the browser uploads to |
-| `S3_ACCESS_KEY`, `S3_SECRET_KEY` | `ctviewer`, `ctviewer-local-storage` | MinIO credentials; set the secret in `.env` |
 
 **Troubleshooting.** On Linux the containers run as uid 10001 and need read access to the data
 (`chmod -R a+rX data`). For an existing database, apply the migrations below instead of deleting its volume.
@@ -165,7 +158,7 @@ Logs: `docker compose logs -f api worker relay`.
 
 Fresh installations use `backend/schema.sql`. Before running the updated API/workers against an existing database,
 stop those processes, back up PostgreSQL, and apply the files in `backend/migrations/` in order. `001` removes the
-sagittal output's NOT NULL constraint; `002` adds upload sessions, the outbox and lease columns, and requeues
+sagittal output's NOT NULL constraint; `002` adds the outbox and lease columns, and requeues
 jobs left running. Neither deletes existing series or results.
 From PowerShell, using the database credentials configured in Compose:
 
@@ -182,7 +175,7 @@ Use explicit keyword arguments for application function calls, such as `get_seri
 Keep positional arguments where Python or a third-party API requires them (including the RQ task invocation).
 Services use typed records, the HTTP layer uses Pydantic response models, and SQL stays in the repository.
 Ruff checks imports, common errors and application function annotations; `ruff format` maintains formatting.
-Database and storage failures are retried from PostgreSQL attempt counts; data problems fail the job at once with a readable error.
+Database failures are retried from PostgreSQL attempt counts; data problems fail the job at once with a readable error.
 The API closes its database pool on shutdown.
 
 The current reconstruction supports single-frame MONOCHROME2 CT in standard axial orientation, matching image

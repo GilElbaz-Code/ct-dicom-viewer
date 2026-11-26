@@ -53,7 +53,6 @@ class Claim:
     job_id: int
     token: UUID
     path: str
-    upload_id: UUID | None
 
 
 def claim_job(*, job_id: int, token: UUID) -> Claim | None:
@@ -65,10 +64,10 @@ def claim_job(*, job_id: int, token: UUID) -> Claim | None:
             "lease_expires_at = clock_timestamp() + %(lease)s * interval '1 second', error = NULL "
             "WHERE id = %(id)s AND status = 'queued' AND attempt_count < %(max)s "
             "AND EXISTS (SELECT 1 FROM job_outbox WHERE job_id = jobs.id AND "
-            "(published_at IS NOT NULL OR next_dispatch_at <= clock_timestamp())) RETURNING path, upload_id",
+            "(published_at IS NOT NULL OR next_dispatch_at <= clock_timestamp())) RETURNING path",
             {"id": job_id, "token": token, "lease": settings.lease_seconds, "max": settings.max_attempts},
         ).fetchone()
-    return Claim(job_id=job_id, token=token, path=row["path"], upload_id=row["upload_id"]) if row else None
+    return Claim(job_id=job_id, token=token, path=row["path"]) if row else None
 
 
 def require_lease(*, conn: Connection[DictRow], claim: Claim) -> None:
