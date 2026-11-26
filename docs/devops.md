@@ -31,7 +31,8 @@ All services share the compose network and find each other by service name:
 
 * The browser talks only to `web`. Its port is published on `127.0.0.1:8080`, because the app has no login.
 * `web`'s nginx sends `/api/*` to `http://api:8000` ([`nginx.conf`](../frontend/nginx.conf)), so the browser sees
-  a single origin (no CORS).
+  a single origin (no CORS). nginx looks `api` up through Docker's DNS (`resolver 127.0.0.11`) on each
+  request, so a recreated `api` container with a new IP is found without restarting `web`.
 * `api` and `worker` reach PostgreSQL at `db:5432` and Redis at `redis:6379` through `DATABASE_URL` and
   `REDIS_URL`.
 * Start order follows the healthchecks: `db` and `redis` must be healthy before the backend services start, and
