@@ -6,6 +6,7 @@ Run locally with:  uv run uvicorn app.main:app --reload
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from http import HTTPStatus
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -31,15 +32,15 @@ app.include_router(router=series.router)
 
 @app.exception_handler(NotFound)
 def not_found(_: Request, exc: NotFound) -> JSONResponse:
-    return JSONResponse(content={"detail": str(exc)}, status_code=404)
+    return JSONResponse(content={"detail": str(exc)}, status_code=HTTPStatus.NOT_FOUND)
 
 
 @app.exception_handler(InvalidInput)
 def invalid_input(_: Request, exc: InvalidInput) -> JSONResponse:
-    return JSONResponse(content={"detail": str(exc)}, status_code=422)
+    return JSONResponse(content={"detail": str(exc)}, status_code=HTTPStatus.UNPROCESSABLE_CONTENT)
 
 
-@app.get("/api/health", tags=["health"])
+@app.get("/api/health", status_code=HTTPStatus.OK, tags=["health"])
 def health() -> dict[str, str]:
     """Liveness for the container healthcheck."""
     return {"status": "ok"}

@@ -1,7 +1,8 @@
 """Request and response shapes. They document the API at /api/docs and filter what leaves the server."""
 
 from datetime import datetime
-from typing import Annotated, Literal
+from http import HTTPStatus
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import Query
@@ -12,6 +13,20 @@ BeforeId = Annotated[
     int | None, Query(ge=1, le=2**63 - 1, description="Only rows with a smaller id: the last id of the page before")
 ]
 Limit = Annotated[int, Query(ge=1, le=500, description="Page size")]
+
+
+class Error(BaseModel):
+    detail: str | list[dict[str, Any]]  # our message, or FastAPI's list of invalid fields
+
+
+# The error responses a route can give, for /api/docs. main.py maps NotFound and InvalidInput to them.
+NOT_FOUND: dict[int | str, dict[str, Any]] = {
+    HTTPStatus.NOT_FOUND: {"model": Error, "description": "The series or slice does not exist"}
+}
+INVALID: dict[int | str, dict[str, Any]] = {
+    HTTPStatus.UNPROCESSABLE_CONTENT: {"model": Error, "description": "Invalid input, with the reason"}
+}
+PNG: dict[int | str, dict[str, Any]] = {HTTPStatus.OK: {"content": {"image/png": {}}, "description": "A PNG image"}}
 
 
 class SubmitPath(BaseModel):
