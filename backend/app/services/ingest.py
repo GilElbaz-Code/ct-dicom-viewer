@@ -58,6 +58,8 @@ def resolve_inside_data_dir(raw: str) -> Path:
     path = (root / raw.strip()).resolve()
     if not path.is_relative_to(root):
         raise InvalidInput(f"{raw} is outside the data directory")
+    if path == root:
+        raise InvalidInput("Choose a series folder inside the data directory, not the data directory itself")
     if not path.is_dir():
         raise InvalidInput(f"Directory not found: {raw}")
     return path

@@ -20,6 +20,7 @@ from app.db.pool import pool
 from app.errors import LeaseLost
 from app.main import app
 from app.services import dicom, ingest
+from tests.conftest import write_slice
 
 DATABASE_URL = os.environ.get("TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(not DATABASE_URL, reason="set TEST_DATABASE_URL to a disposable PostgreSQL database")
@@ -138,6 +139,33 @@ def test_expired_idempotency_keys_are_deleted_so_the_key_can_be_reused(client):
     assert again["id"] != first["id"]
 
 
+def test_reindexing_with_more_slices_drops_the_old_plane_until_analysis_succeeds(client, make_series, monkeypatch):
+    directory = make_series("chest", n=5)
+    submit(client, "/api/jobs", json={"path": "chest"})
+    write_slice(directory / "000.dcm", z=-87.5, value=50)  # a sixth slice, same SeriesInstanceUID
+
+    def fail_analysis(**kwargs):
+        raise ValueError("Decoder unavailable")
+
+    monkeypatch.setattr(dicom, "sagittal", fail_analysis)
+    submit(client, "/api/jobs", json={"path": "chest"})
+    [series] = client.get("/api/series").json()
+    assert (series["num_slices"], series["analysis_available"]) == (6, False)
+    assert client.get(f"/api/series/{series['id']}/sagittal").status_code == 422  # not a 500 from a 5-row plane
+
+
+def test_description_search_matches_wildcard_characters_literally(client, make_series):
+    make_series("chest")
+    submit(client, "/api/jobs", json={"path": "chest"})
+    for text, matches in (("chest", 1), ("%", 0), ("CH_ST", 0)):
+        assert len(client.get("/api/series", params={"description": text}).json()) == matches, text
+
+
+def test_numbers_beyond_the_database_types_are_rejected_not_crashing(client):
+    assert client.get("/api/series/1/axial/3000000000").status_code == 422
+    assert client.get(f"/api/series/{2**63}").status_code == 422
+
+
 def test_queue_outage_keeps_accepted_jobs_queued(client):
     submitted = client.post("/api/jobs", json={"path": "chest"}).json()
 
@@ -203,8 +231,6 @@ def make_due(job_id):
 
 
 def test_only_one_concurrent_delivery_can_claim_a_job(client):
-    from concurrent.futures import ThreadPoolExecutor
-
     job_id = client.post("/api/jobs", json={"path": "chest"}).json()["id"]
     with ThreadPoolExecutor(max_workers=4) as executor:
         claims = list(executor.map(lambda _: repository.claim_job(job_id=job_id, token=uuid4()), range(4)))

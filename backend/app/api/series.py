@@ -2,7 +2,7 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, Query, Response
+from fastapi import APIRouter, Path, Query, Response
 
 from app.api.schemas import Located, Series
 from app.services import viewer
@@ -12,6 +12,8 @@ router = APIRouter(prefix="/api/series", tags=["series"])
 
 Width = Annotated[float, Query(gt=0, le=10000, description="Window width (HU)")]
 Level = Annotated[float, Query(ge=-2000, le=5000, description="Window level, the centre (HU)")]
+SeriesId = Annotated[int, Path(ge=1, le=2**63 - 1)]  # bigint
+SliceIndex = Annotated[int, Path(ge=0, lt=2**31 - 1)]  # PostgreSQL array subscripts are int4
 PNG: dict[int | str, dict] = {200: {"content": {"image/png": {}}}}  # documents the image responses in /api/docs
 
 
@@ -24,13 +26,13 @@ def search(
 
 
 @router.get("/{series_id}", response_model=Series)
-def get_series(series_id: int) -> SeriesRecord:
+def get_series(series_id: SeriesId) -> SeriesRecord:
     return viewer.get_series(series_id=series_id)
 
 
 @router.get("/{series_id}/locate", response_model=Located)
 def locate(
-    series_id: int,
+    series_id: SeriesId,
     z: Annotated[float | None, Query(allow_inf_nan=False, description="Location in mm (IPP z)")] = None,
     index: Annotated[int | None, Query(description="Slice index, 0 = most inferior")] = None,
 ) -> LocatedRecord:
@@ -38,12 +40,12 @@ def locate(
 
 
 @router.get("/{series_id}/axial/{index}", response_class=Response, responses=PNG)
-def axial(series_id: int, index: int, window: Width = 400, level: Level = 40) -> Response:
+def axial(series_id: SeriesId, index: SliceIndex, window: Width = 400, level: Level = 40) -> Response:
     return Response(
         content=viewer.axial_png(series_id=series_id, index=index, width=window, level=level), media_type="image/png"
     )
 
 
 @router.get("/{series_id}/sagittal", response_class=Response, responses=PNG)
-def sagittal(series_id: int, window: Width = 400, level: Level = 40) -> Response:
+def sagittal(series_id: SeriesId, window: Width = 400, level: Level = 40) -> Response:
     return Response(content=viewer.sagittal_png(series_id=series_id, width=window, level=level), media_type="image/png")

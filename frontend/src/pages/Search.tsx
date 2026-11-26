@@ -15,7 +15,7 @@ export function Search({ onOpen }: { onOpen: (id: number) => void }) {
   function search(event: SubmitEvent) {
     event.preventDefault();
     setFilters({
-      max_slice_thickness: thickness === "" ? undefined : Number(thickness),
+      max_slice_thickness: thickness === "" || Number(thickness) <= 0 ? undefined : Number(thickness),
       description: text.trim() || undefined,
     });
   }

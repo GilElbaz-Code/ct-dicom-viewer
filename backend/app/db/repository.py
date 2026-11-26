@@ -30,13 +30,9 @@ def create_jobs(paths: list[str], batch_id: UUID | None, idempotency_key: str | 
     """Jobs and their outbox rows commit together. A repeated idempotency key returns the jobs it created."""
     with pool().connection() as conn:
         if idempotency_key is not None:
-            # A concurrent request holding the same key makes this INSERT wait until it commits, then do nothing.
-            claimed = conn.execute(
-                "INSERT INTO idempotency_keys (key, paths) VALUES (%s, %s) ON CONFLICT (key) DO NOTHING RETURNING key",
-                (idempotency_key, paths),
-            ).fetchone()
-            if claimed is None:
-                return replay(conn=conn, idempotency_key=idempotency_key, paths=paths)
+            replayed = claim_or_replay(conn=conn, idempotency_key=idempotency_key, paths=paths)
+            if replayed is not None:
+                return replayed
         rows = conn.execute(
             f"INSERT INTO jobs (path, batch_id) SELECT unnest(%s::text[]), %s RETURNING {JOB_COLUMNS}",
             (paths, batch_id),
@@ -53,8 +49,19 @@ def create_jobs(paths: list[str], batch_id: UUID | None, idempotency_key: str | 
         return rows
 
 
-def replay(*, conn: Connection[DictRow], idempotency_key: str, paths: list[str]) -> list[JobRecord]:
-    row = conn.execute("SELECT paths, job_ids FROM idempotency_keys WHERE key = %s", (idempotency_key,)).fetchone()
+def claim_or_replay(*, conn: Connection[DictRow], idempotency_key: str, paths: list[str]) -> list[JobRecord] | None:
+    """None: this request now owns the key and creates the jobs. Otherwise: the jobs the key's first request created."""
+    while True:
+        # A concurrent request holding the same key makes this INSERT wait until it commits, then do nothing.
+        if conn.execute(
+            "INSERT INTO idempotency_keys (key, paths) VALUES (%s, %s) ON CONFLICT (key) DO NOTHING RETURNING key",
+            (idempotency_key, paths),
+        ).fetchone():
+            return None
+        row = conn.execute("SELECT paths, job_ids FROM idempotency_keys WHERE key = %s", (idempotency_key,)).fetchone()
+        if row is not None:
+            break
+        # The relay deleted the expired key between the two statements: claim it again.
     if row["paths"] != paths:
         raise InvalidInput("This Idempotency-Key was already used for a different request")
     return conn.execute(f"SELECT {JOB_COLUMNS} FROM jobs WHERE id = ANY(%s) ORDER BY id", (row["job_ids"],)).fetchall()
@@ -171,7 +178,11 @@ def save_series_metadata(*, claim: Claim, series: dict[str, Any]) -> int:
                 slice_thickness = EXCLUDED.slice_thickness, spacing_between_slices = EXCLUDED.spacing_between_slices,
                 slice_spacing = EXCLUDED.slice_spacing, rows = EXCLUDED.rows, columns = EXCLUDED.columns,
                 z_positions = EXCLUDED.z_positions, files = EXCLUDED.files,
-                source_path = EXCLUDED.source_path, updated_at = now()
+                source_path = EXCLUDED.source_path, updated_at = now(),
+                -- Keep the earlier result only if it fits the new slices: a plane of another shape cannot be drawn.
+                sagittal = CASE WHEN series.rows = EXCLUDED.rows
+                                 AND cardinality(series.z_positions) = cardinality(EXCLUDED.z_positions)
+                                THEN series.sagittal END
             RETURNING id
             """,
             series,
@@ -212,8 +223,18 @@ def search_series(max_slice_thickness: float | None, description: str | None, li
                    OR study_description ILIKE %(pattern)s OR series_description ILIKE %(pattern)s)
             ORDER BY id DESC LIMIT %(limit)s
             """,
-            {"thickness": max_slice_thickness, "text": description, "pattern": f"%{description}%", "limit": limit},
+            {
+                "thickness": max_slice_thickness,
+                "text": description,
+                "pattern": f"%{like_literal(description)}%",
+                "limit": limit,
+            },
         ).fetchall()
+
+
+def like_literal(text: str | None) -> str:
+    """Escape LIKE's wildcards (backslash is PostgreSQL's default escape character)."""
+    return (text or "").replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def get_series(series_id: int) -> SeriesRecord | None:

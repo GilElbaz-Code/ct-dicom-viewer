@@ -79,7 +79,7 @@ export function Jobs({ onOpen }: { onOpen: (id: number) => void }) {
             {directories.data?.map((name) => (
               <Group key={name} justify="space-between" py={6} style={{ borderBottom: "1px solid var(--mantine-color-dark-4)" }}>
                 <Text size="sm">{name}</Text>
-                <Button size="compact-sm" variant="light" onClick={() => indexFolder.mutate(name)}>
+                <Button size="compact-sm" variant="light" disabled={indexFolder.isPending} onClick={() => indexFolder.mutate(name)}>
                   Index
                 </Button>
               </Group>

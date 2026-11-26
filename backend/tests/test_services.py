@@ -57,3 +57,36 @@ def test_paths_must_stay_inside_the_data_directory(tmp_path, monkeypatch):
         ingest.resolve_inside_data_dir("../")
     with pytest.raises(InvalidInput, match="not found"):
         ingest.resolve_inside_data_dir("missing")
+    for whole_library in (".", "  ", "series_1/.."):
+        with pytest.raises(InvalidInput, match="not the data directory itself"):
+            ingest.resolve_inside_data_dir(whole_library)
+
+
+class FakeQueue:
+    """Records enqueues; fetch_job reports the status RQ would."""
+
+    def __init__(self):
+        self.status: dict[str, str] = {}
+        self.enqueued: list[str] = []
+
+    def fetch_job(self, job_id):
+        status = self.status.get(job_id)
+        return None if status is None else type("Job", (), {"get_status": lambda _: status})()
+
+    def enqueue(self, func, *args, job_id, **kwargs):
+        self.enqueued.append(job_id)
+        self.status[job_id] = "queued"
+
+
+def test_publish_does_not_stack_a_job_that_is_still_waiting_in_the_queue(monkeypatch):
+    fake = FakeQueue()
+    monkeypatch.setattr(jobs, "queue", lambda: fake)
+    jobs.publish(job_id=7)
+    jobs.publish(job_id=7)  # the relay's 60-second republish while the job waits behind others
+    assert fake.enqueued == ["ingest-7"]
+    fake.status["ingest-7"] = "failed"  # e.g. its process was killed; the database lease decides what happens next
+    jobs.publish(job_id=7)
+    assert fake.enqueued == ["ingest-7", "ingest-7"]
+    del fake.status["ingest-7"]  # lost from Redis entirely
+    jobs.publish(job_id=7)
+    assert len(fake.enqueued) == 3

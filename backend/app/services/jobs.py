@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 
 from redis import Redis
 from rq import Queue
+from rq.job import JobStatus
 
 from app.config import settings
 from app.db import repository
@@ -23,8 +24,14 @@ def queue() -> Queue:
 
 
 def publish(job_id: int) -> None:
-    """Called by the relay. Duplicate queue messages are safe; PostgreSQL owns retries."""
-    queue().enqueue(ingest.run, job_id, job_timeout=settings.job_timeout_seconds, result_ttl=0, failure_ttl=86400)
+    """Called by the relay. A job still waiting in the queue is not added twice; any other duplicate is harmless."""
+    rq_job_id = f"ingest-{job_id}"
+    waiting = queue().fetch_job(rq_job_id)
+    if waiting is not None and waiting.get_status() == JobStatus.QUEUED:
+        return  # not lost, only behind other jobs; a second copy would also inflate the autoscaler's queue length
+    queue().enqueue(
+        ingest.run, job_id, job_id=rq_job_id, job_timeout=settings.job_timeout_seconds, result_ttl=0, failure_ttl=86400
+    )
 
 
 def submit(paths: list[str], batch_id: UUID | None = None, idempotency_key: str | None = None) -> list[JobRecord]:
