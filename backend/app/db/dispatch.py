@@ -24,7 +24,9 @@ def publish_due(*, publish: Callable[[int], None]) -> int:
                     "interval '5 seconds' WHERE job_id = %s",
                     (f"{type(exc).__name__}: {exc}", row["job_id"]),
                 )
-                continue
+                # Redis is likely down: stop here so a hung queue holds this transaction for one timeout, not 100.
+                # The remaining rows stay due for the next pass; the failed one moves behind them.
+                break
             conn.execute(
                 "UPDATE job_outbox SET published_at = clock_timestamp(), last_error = NULL, "
                 "next_dispatch_at = clock_timestamp() + %s * interval '1 second' WHERE job_id = %s",

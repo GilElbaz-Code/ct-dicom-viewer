@@ -270,6 +270,21 @@ def test_queue_outage_keeps_accepted_jobs_queued(client):
     assert "Connection refused" in row["last_error"]
 
 
+def test_queue_outage_stops_the_pass_at_the_first_failure(client):
+    client.post("/api/jobs", json={"path": "a"})
+    client.post("/api/jobs", json={"path": "b"})
+    attempts = []
+
+    def unavailable(job_id):
+        attempts.append(job_id)
+        raise RedisConnectionError("Timeout")
+
+    assert dispatch.publish_due(publish=unavailable) == 0
+    assert len(attempts) == 1  # not one socket timeout per due job while Redis hangs
+    published = []
+    assert dispatch.publish_due(publish=published.append) == 1  # the other job is still due; the failed one waits 5 s
+
+
 def test_analysis_failure_preserves_searchable_metadata(client, make_series, monkeypatch):
     make_series("chest")
 

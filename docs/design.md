@@ -1,8 +1,7 @@
 # Part 1 · System design: CT processing service
 
 Researchers upload a CT study, request processing, and return later to view images and query metadata.
-This document describes the target service. The final section distinguishes it from the current Part 2
-implementation; target capabilities are not claims that those features already exist.
+This document describes the full service. Part 2 implements a slice of it; the last section lists which parts.
 
 ## Assumptions
 
@@ -103,50 +102,55 @@ sequenceDiagram
     Note over R,DB: Reconciler recovers stranded dispatch and expired leases
 ```
 
-Separate header extraction from viewer geometry validation. Save available metadata after identifying a single
-series, before pixel decoding or analysis. Missing optional tags are null. Unreadable headers or mixed series
-produce an ingestion failure; metadata that cannot be extracted cannot be promised. Unsupported geometry or
-corrupt pixels produce an analysis failure while retaining the searchable index.
+Header extraction and viewer geometry validation are separate steps. The worker saves the metadata as soon as it
+knows the folder holds a single series, before decoding any pixels, because a series with odd geometry is still
+worth finding in a search. Missing optional tags are stored as null. Unreadable headers or mixed series are an
+ingestion failure, since there is no reliable metadata to save. Unsupported geometry or corrupt pixels are an
+analysis failure, and the series stays searchable.
 
 ## Data model and interfaces
 
 * `series`: unique SeriesInstanceUID, StudyInstanceUID, anonymized patient ID, study and series descriptions,
   modality, pixel spacing, slice thickness, header spacing between slices, measured spacing, slice count, rows
-  and columns. Store ordered z positions and file references when available. Upserts avoid duplicate metadata
+  and columns, plus the ordered z positions and slice file references. Upserts avoid duplicate metadata
   for repeated submissions of the same immutable series. A series can exist without a successful analysis.
 * `jobs`: source reference, batch ID, CSV row number, series link, status (`queued`, `running`, `done`, `failed`),
   processing stage, attempt count, error reason, timestamps, lease expiry and attempt token.
 * `results`: successful job/series link and sagittal plane, initially as PostgreSQL `bytea` with dimensions and
-  value format. Save the result and mark its job done in one transaction. Later failed jobs do not erase results.
+  value format. The result and its job's `done` status commit in one transaction, so a job is never done without
+  its result. Later failed jobs do not erase results.
 * `upload_sessions`: manifest, object prefix, progress, expiry and accepted job link.
 * `job_outbox`: publication requests committed with jobs; publication can safely repeat.
 
 Study fields initially live on the series row. One series per directory does not imply one series per study:
 study-level searches deduplicate by StudyInstanceUID. A thickness query uses `slice_thickness < 1.5`, excluding
 unknown values. A study-description filter searches StudyDescription; general description search may include
-both descriptions. Index thickness and study UID, and paginate catalog and job history so old results remain reachable.
+both descriptions. Thickness and study UID are indexed, and the catalog and job history are paged so old results
+remain reachable.
 
-Preserve existing API concepts: `POST /api/jobs`, `POST /api/batches`, `GET /api/jobs`, `GET /api/series`,
-`GET /api/series/{id}`, and series `/locate`, `/axial/{index}` and `/sagittal` endpoints. Upload sessions are
-full-service additions. Series responses expose analysis availability; image endpoints use the latest successful
+The full service keeps the Part 2 API: `POST /api/jobs`, `POST /api/batches`, `GET /api/jobs`, `GET /api/series`,
+`GET /api/series/{id}`, and the series `/locate`, `/axial/{index}` and `/sagittal` endpoints. Upload sessions are
+the only new resource. Series responses expose analysis availability; image endpoints use the latest successful
 result by completion time, or report that analysis is unavailable. Job history retains individual result links.
 The browser polls pending work and reloads durable history on return.
 
 ## Part 2 viewer behavior
 
-* Sort slices by ImagePositionPatient z, never filename. Index 0 is the lowest z.
-* Accept either z in millimetres or a zero-based index. Choose the nearest z; ties select the lower index.
-  Out-of-range z selects the nearest endpoint with an explanation; invalid indices are rejected.
-* Decode the axial slice and apply its modality transform before windowing. Under the geometry assumptions,
-  generate the sagittal plane from the middle column (`columns // 2`) of each slice.
-* Display superior slices at the sagittal image's top and mark the selected slice with a horizontal line through
-  its row. Label the actual selected z. Use physical spacing for proportions; irregular geometry needs resampling
-  or an explicit unsupported-data error.
-* Show all ten required entries: patient ID, study description, series description, modality, pixel spacing,
-  slice thickness, spacing between slices, number of slices, rows and columns. Label measured spacing separately
-  when the header spacing is absent or differs.
-* Default window width to 400 and level to 40. Require positive width and apply changes to both views. Store
-  analysis values before windowing, so changing the window renders PNGs without rerunning analysis.
+* Slices are sorted by ImagePositionPatient z, never by file name, because file names and InstanceNumber are not
+  guaranteed to follow anatomy. Index 0 is the lowest z.
+* The user gives either z in millimetres or a zero-based index. The nearest z wins, and a tie picks the lower
+  index. A z outside the scan shows the nearest end slice and says so; an invalid index is rejected.
+* The axial slice is decoded and converted to Hounsfield units (the modality transform) before windowing. The
+  sagittal plane is the middle column (`columns // 2`) of every slice, which is exact under the geometry
+  assumptions above.
+* Superior slices are at the top of the sagittal image, and a horizontal line through the selected slice's row
+  marks it, labelled with the actual z. Proportions follow the physical spacing. Irregular geometry would need
+  resampling, so it is rejected with a reason instead of being drawn distorted.
+* The metadata table shows all ten required entries: patient ID, study description, series description,
+  modality, pixel spacing, slice thickness, spacing between slices, number of slices, rows and columns. Spacing
+  measured from the positions is shown next to the header value when the tag is missing or disagrees.
+* The window defaults to width 400 and level 40, the width must be positive, and a change applies to both views.
+  The analysis stores Hounsfield values, not a windowed image, so changing the window only re-renders PNGs.
 
 Part 2 now validates standard axial orientation, matching dimensions and pixel spacing, aligned in-plane origins,
 and approximately uniform z spacing before analysis. It rejects unsupported geometry with a reason while retaining
@@ -174,8 +178,9 @@ application recovery logic in addition to RQ:
 * **Database outage during failure reporting:** callbacks cannot persist while PostgreSQL is unavailable. Once it
   returns, reconciliation finds expired leases and retries or records an interruption failure. Preserve a specific
   cause if available; otherwise state that the worker stopped and the original cause was not recorded.
-* **Visible errors:** persist the failed stage and readable reason, such as "Directory not found", "Expected one
-  series, found 2", or "Pixel decoding failed". Keep diagnostic traces in protected logs tied to job IDs. Analysis
+* **Visible errors:** the job stores the failed stage and a readable reason, such as "Directory not found",
+  "Expected one series, found 2", or "Pixel decoding failed". Stack traces go to protected logs, tagged with the job
+  ID, because they can contain paths and header values that users should not see. Analysis
   failure retains metadata. Terminal outcomes remain visible after browser closure and service restart.
 
 ## Choices and trade-offs
@@ -190,29 +195,33 @@ application recovery logic in addition to RQ:
 | Small results in PostgreSQL | Result and completion commit atomically. Large or numerous outputs eventually need object storage and cleanup of unreferenced results. |
 | Server-rendered PNG | Avoids sending the entire volume to the browser. Window changes require requests and server work; latency must be measured. |
 
-Scale workers independently with bounded concurrency to control disk bandwidth and memory. The sagittal algorithm
+Workers scale independently of the API, and each runs one job at a time, which bounds disk bandwidth and memory
+per worker. The sagittal algorithm
 retains headers, one decoded slice and the output plane rather than the entire volume; actual memory depends on
 image dimensions and decoder buffers. API replicas share persistent storage and PostgreSQL.
 
-At a million series, move results to object storage, add a trigram index for substring searches, use keyset
-pagination, and archive or partition job history. Normalize studies if repeated fields become costly, introduce
-versioned migrations, and measure before adding replicas or another search service. The
+At a million series, results would move to object storage, substring searches would get a trigram index, and job
+history would be archived or partitioned (pagination is already keyset). Studies would get their own table if
+repeated fields become costly, migrations would become versioned, and replicas or a search service would come only
+after measurements show the need. The
 [README](../README.md#why-postgresql) contains the database rationale and scaling discussion required by Part 2.
 
 ## Security and operations
 
 The full service uses institutional SSO, accepting identity headers only from a trusted proxy. The initial group
-shares access; separate groups would require authorization on metadata, jobs, sources and results. Scope signed
-URLs to an upload session and ensure sealing prevents writes using old credentials, for example by copying verified
-objects into a worker-readable prefix that upload credentials cannot modify. Validate manifest paths and bound
-file counts and total bytes.
+shares access; separate groups would require authorization on metadata, jobs, sources and results. Signed URLs
+are scoped to one upload session. Sealing copies the verified objects into a worker-readable prefix that upload
+credentials cannot write to, so a leaked upload URL cannot change a series after it was checked. Manifest paths are
+validated, and file counts and total bytes are bounded.
 
-Resolve shared paths, including symlinks, within the data root and mount it read-only. Use non-root containers,
-managed secrets and HTTPS. Avoid patient metadata and pixels in logs; protect logs and backups as research data.
-Test restoration of both PostgreSQL and source files.
+Shared paths are resolved, symlinks included, and must stay inside the data root, which is mounted read-only.
+Containers run as non-root, secrets come from a secret manager, and all traffic is HTTPS. Logs carry no patient
+metadata or pixels, and logs and backups are protected as research data. Restores of both PostgreSQL and the
+source files are tested, since a backup that was never restored is not known to work.
 
-Monitor API errors/latency, oldest pending outbox entry, oldest queued job, expired leases, failures by stage,
-worker availability and storage capacity. Alert when reconciliation cannot progress. `/api/health` provides
+Monitoring covers API errors and latency, the oldest pending outbox entry, the oldest queued job, expired leases,
+failures by stage, worker availability and storage capacity, with an alert when reconciliation stops making
+progress. `/api/health` provides
 liveness; deployment readiness checks required dependencies. See [devops.md](devops.md) for existing deployment
 notes; relay, lease and upload monitoring described here are target additions.
 
