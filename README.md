@@ -182,3 +182,18 @@ The current reconstruction supports single-frame MONOCHROME2 CT in standard axia
 sizes and pixel spacing, aligned in-plane origins, and approximately uniform z spacing. It rejects unsupported
 geometry with a reason rather than displaying a distorted sagittal reconstruction. Metadata remains searchable.
 See `docs/design.md` for which parts of the full-service design are implemented.
+
+## How AI was used
+
+I used Claude Code (Anthropic) throughout, as the brief encourages.
+
+* **Planning:** I worked out the design with it: the Part 1 architecture, the database choice and how Part 2 would
+  implement a slice of that design.
+* **Implementation:** It wrote most of the code, tests, Dockerfiles and docs from that plan.
+* **My direction:** I set the structure and the standards: a three-layer backend (`api/` for HTTP, `services/`
+  for the logic, `db/` for all SQL), typed records and Pydantic models at the boundaries, keyword arguments, and
+  Ruff for linting and formatting. I also made the scope calls. For example, I removed a working MinIO browser
+  upload after checking it against the brief, because Part 2 does not ask for it. It stays in the Part 1 design.
+* **Checking:** I had changes checked by running them, not just by reading the code: the test suite against a real PostgreSQL, the full
+  Compose stack, screenshots of the viewer at laptop and desktop sizes, and a fresh clone built with no cache
+  on empty volumes before submission.
