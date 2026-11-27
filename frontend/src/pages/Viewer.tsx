@@ -15,9 +15,9 @@ import {
   Title,
 } from "@mantine/core";
 import { useDebouncedValue } from "@mantine/hooks";
-import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { type MouseEvent, type SubmitEvent, type ReactNode, useState } from "react";
-import { type Series, type SliceTarget, WINDOW_LIMITS, api, axialUrl, imageError, sagittalUrl } from "../api";
+import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
+import { type MouseEvent, type SubmitEvent, type ReactNode, useRef, useState } from "react";
+import { type Series, type SliceTarget, WINDOW_LIMITS, api, axialUrl, imageError, isStale, sagittalUrl } from "../api";
 
 const PRESETS = [
   { label: "Soft tissue", width: 400, level: 40 },
@@ -38,6 +38,10 @@ export function Viewer({ seriesId, onSelect, onGoToJobs }: Props) {
   const list = useQuery({ queryKey: ["series", "all"], queryFn: () => api.searchSeries({}) });
   const id = seriesId ?? list.data?.[0]?.id ?? null;
   const series = useQuery({ queryKey: ["series", id], queryFn: () => api.getSeries(id!), enabled: id !== null });
+  const queryClient = useQueryClient();
+  // A location or image request found a newer version: reload the metadata. Its new updated_at changes the
+  // SeriesView key, so the view remounts and every slice, image URL and pending answer of the old version is dropped.
+  const reload = () => queryClient.invalidateQueries({ queryKey: ["series"] });
 
   if (list.data?.length === 0) {
     return (
@@ -75,7 +79,7 @@ export function Viewer({ seriesId, onSelect, onGoToJobs }: Props) {
       {(list.error ?? series.error) && <Alert color="red">{(list.error ?? series.error)!.message}</Alert>}
       {/* The key resets the slice and window when another series (or a re-indexed one) is shown. */}
       {series.data?.analysis_available
-        ? <SeriesView key={`${series.data.id}-${series.data.updated_at}`} series={series.data} picker={picker} />
+        ? <SeriesView key={`${series.data.id}-${series.data.updated_at}`} series={series.data} picker={picker} onStale={reload} />
         : <Stack maw={520}>
             {picker}
             {series.data && <>
@@ -88,20 +92,50 @@ export function Viewer({ seriesId, onSelect, onGoToJobs }: Props) {
   );
 }
 
-function SeriesView({ series, picker }: { series: Series; picker: ReactNode }) {
+function SeriesView({ series, picker, onStale }: { series: Series; picker: ReactNode; onStale: () => void }) {
+  // One reload per shown version, so a conflict that persists shows its message instead of reloading in a loop.
+  const reloaded = useRef(false);
+  const stale = (error: unknown) => {
+    if (isStale(error) && !reloaded.current) {
+      reloaded.current = true;
+      onStale();
+    }
+  };
   const [mode, setMode] = useState<"mm" | "index">("mm");
   const [input, setInput] = useState<string | number>("");
   const [target, setTarget] = useState<SliceTarget>({ index: Math.floor(series.num_slices / 2) });
   const located = useQuery({
-    queryKey: ["locate", series.id, target],
-    queryFn: () => api.locate(series.id, target),
+    queryKey: ["locate", series.id, series.updated_at, target],
+    queryFn: () =>
+      api.locate(series, target).catch((error: unknown) => {
+        stale(error);
+        throw error;
+      }),
     placeholderData: keepPreviousData, // keep showing the last slice while the next one is found
   });
   const slice = located.data;
 
+  // The input follows the shown slice (slider, sagittal click, Show), except a z the user entered stays as typed.
+  const [synced, setSynced] = useState(slice);
+  if (slice !== synced) {
+    setSynced(slice);
+    if (slice && (mode === "index" || "index" in target)) setInput(mode === "index" ? slice.index : Number(slice.z.toFixed(2)));
+  }
+
   const [windowing, setWindowing] = useState({ width: 400, level: 40 });
   const [shown] = useDebouncedValue(windowing, 250); // one image request after typing stops, not one per keystroke
   const preset = PRESETS.find((p) => p.width === windowing.width && p.level === windowing.level)?.label ?? ""; // "": typed values match no preset, so none is highlighted
+
+  // Switching units keeps the location: the typed value is converted, or the shown slice is used when nothing is typed.
+  function switchUnit(next: "mm" | "index") {
+    const step = series.num_slices > 1 ? (series.z_max - series.z_min) / (series.num_slices - 1) : 1; // spacing is validated uniform
+    const toIndex = (z: number) => Math.min(series.num_slices - 1, Math.max(0, Math.round((z - series.z_min) / step)));
+    const toZ = (index: number) => Number((series.z_min + index * step).toFixed(2));
+    const typed = input === "" ? NaN : Number(input); // NaN also covers partial input such as "-"
+    setMode(next);
+    if (Number.isFinite(typed)) setInput(next === "index" ? toIndex(typed) : toZ(typed));
+    else if (slice) setInput(next === "index" ? slice.index : Number(slice.z.toFixed(2)));
+  }
 
   function show(event: SubmitEvent) {
     event.preventDefault();
@@ -128,10 +162,7 @@ function SeriesView({ series, picker }: { series: Series; picker: ReactNode }) {
             <SegmentedControl
               aria-label="Location unit"
               value={mode}
-              onChange={(value) => {
-                setMode(value as "mm" | "index");
-                setInput("");
-              }}
+              onChange={(value) => switchUnit(value as "mm" | "index")}
               data={[
                 { value: "mm", label: "z (mm)" },
                 { value: "index", label: "Index" },
@@ -188,7 +219,7 @@ function SeriesView({ series, picker }: { series: Series; picker: ReactNode }) {
             {slice && (
               <>
                 <div className="image">
-                  <ApiImage src={axialUrl(series, slice.index, shown.width, shown.level)} alt={`Axial slice ${slice.index}`} />
+                  <ApiImage src={axialUrl(series, slice.index, shown.width, shown.level)} alt={`Axial slice ${slice.index}`} onFailure={stale} />
                 </div>
                 <div className="corner top-left">
                   {series.patient_id}
@@ -207,7 +238,7 @@ function SeriesView({ series, picker }: { series: Series; picker: ReactNode }) {
           </Panel>
           <Panel title="Sagittal, mid-volume · click to pick a slice">
             <div className="image pickable" onClick={pickSlice}>
-              <ApiImage src={sagittalUrl(series, shown.width, shown.level)} alt="Sagittal view with the chosen slice marked">
+              <ApiImage src={sagittalUrl(series, shown.width, shown.level)} alt="Sagittal view with the chosen slice marked" onFailure={stale}>
                 {slice && lineTop !== null && (
                   <div className="slice-line" style={{ top: `${lineTop}%` }}>
                     <span>{mm(slice.z)}</span>
@@ -305,14 +336,28 @@ function Metadata({ series }: { series: Series }) {
 const inRange = (value: number, { min, max }: { min: number; max: number }) => value >= min && value <= max;
 
 /** An image from the API. If it fails, the API's reason replaces the browser's broken-image icon. */
-function ApiImage({ src, alt, children }: { src: string; alt: string; children?: ReactNode }) {
+function ApiImage({ src, alt, onFailure, children }: {
+  src: string;
+  alt: string;
+  onFailure: (error: Error) => void; // e.g. a stale version: the viewer reloads the series
+  children?: ReactNode;
+}) {
   const [failure, setFailure] = useState<{ src: string; message: string } | null>(null);
   if (failure?.src === src) {
     return <Text c="red.4" size="sm" p="md">Image unavailable: {failure.message}</Text>;
   }
   return (
     <>
-      <img src={src} alt={alt} onError={() => imageError(src).then((message) => setFailure({ src, message }))} />
+      <img
+        src={src}
+        alt={alt}
+        onError={() =>
+          imageError(src).then((error) => {
+            onFailure(error);
+            setFailure({ src, message: error.message });
+          })
+        }
+      />
       {children}
     </>
   );

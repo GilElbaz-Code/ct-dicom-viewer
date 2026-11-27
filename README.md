@@ -45,8 +45,8 @@ Needs only Docker with Compose v2 (Docker Desktop, or Docker Engine 24+).
    `chest` (a case-insensitive match on the study or series description).
 
 Stop with `docker compose down`. Add `-v` to also delete the database.
-More workers process more series at once: `docker compose up -d --scale worker=6`. For autoscaling on
-Kubernetes, see [deploy/k8s/README.md](deploy/k8s/README.md).
+More workers process more series at once: `docker compose up -d --scale worker=6`. Autoscaling on
+Kubernetes is described in [docs/devops.md](docs/devops.md#deploying-on-kubernetes-or-openshift).
 
 ## Why PostgreSQL
 
@@ -56,15 +56,18 @@ process. It also gives arrays (slice positions), `bytea` (the analysis output) a
 series and mark its job done together. The schema is [`backend/schema.sql`](backend/schema.sql), loaded by
 Postgres when its volume is first created.
 
-**At a million series**, the `series` table itself is small for PostgreSQL. What I would change:
+**At a million series**, PostgreSQL remains a reasonable metadata index, but stored planes and file arrays
+make storage and query measurements essential. What I would change:
 
-* Move the sagittal images (~350 KB each, ~350 GB in total) out of the database into object storage (S3/MinIO),
+* Move the sagittal planes (float32 HU, ~700 KB each, ~700 GB in total) out of the database into object storage (S3/MinIO),
   keeping only the key in the row.
-* Add a `pg_trgm` GIN index for "description contains" searches, which today scan the table. The lists are
-  already paged by id (keyset), so deep pages stay as fast as the first. Elasticsearch/OpenSearch only if search
+* "Description contains" searches already use `pg_trgm` GIN indexes, and the lists are paged by id (keyset), so
+  deep pages avoid scanning and discarding an increasing OFFSET. Filter selectivity still affects latency.
+  Elasticsearch/OpenSearch only if search
   grows into free text or facets over many header fields.
 * Split studies into their own table and keep extra header fields in an indexed JSONB column, so new query fields
-  need no migration. Adopt a migration tool (Alembic or plain numbered SQL files) instead of a single init script.
+  need no migration. Add automated migration version tracking (for example Alembic) around the existing
+  numbered SQL migration approach.
 * Partition or archive the `jobs` table by month; put PgBouncer in front and a read replica behind the search page.
 * For population-level analytics, export to Parquet nightly and query it with DuckDB.
 
@@ -99,7 +102,7 @@ The backend has three layers, and each only calls the one below it:
 
 | File | What it does |
 |---|---|
-| `backend/schema.sql` | Four tables: `series` (metadata, slice positions, analysis output), `jobs` (status, attempts, lease), `job_outbox` (dispatch) and `idempotency_keys` (repeated submissions) |
+| `backend/schema.sql` | Three tables: `series` (metadata, slice positions, analysis output), `jobs` (status, attempts, lease) and `job_outbox` (dispatch) |
 | `backend/app/services/dicom.py` | Read and validate a folder's headers; HU conversion; sagittal; window/level to PNG |
 | `backend/app/services/ingest.py` | The background job: claim (skips duplicates) → path check → headers → sagittal → save |
 | `backend/app/services/jobs.py` | Submit folders or a CSV; `publish` puts a job ID on RQ (called by the relay) |
@@ -123,9 +126,9 @@ Interactive documentation: **http://localhost:8080/api/docs**.
 | `GET /api/jobs?batch_id=&before_id=&limit=` | Jobs, newest first, with the reason for each failure |
 | `GET /api/series?max_slice_thickness=1.5&description=chest&before_id=&limit=` | Query across studies, newest first |
 | `GET /api/series/{id}` | Series metadata |
-| `GET /api/series/{id}/locate?z=…` or `?index=…` | Closest slice to a location in mm, or the slice at an index |
-| `GET /api/series/{id}/axial/{index}?window=400&level=40` | Axial slice as PNG |
-| `GET /api/series/{id}/sagittal?window=400&level=40` | Mid-volume sagittal as PNG |
+| `GET /api/series/{id}/locate?z=…` or `?index=…`, optional `&v=` | Closest slice to a location in mm, or the slice at an index |
+| `GET /api/series/{id}/axial/{index}?window=400&level=40&v=` | Axial slice as PNG |
+| `GET /api/series/{id}/sagittal?window=400&level=40&v=` | Mid-volume sagittal as PNG |
 | `GET /api/health` | Liveness |
 
 Slice index 0 is the most inferior slice (lowest z). Slices are always ordered by `ImagePositionPatient` z,
@@ -137,7 +140,21 @@ PET/CT sample writes 3.27 mm while its slices are 2.5 mm apart.
 pass the last row's `id` as `before_id` for the next page. The UI's *Load older* buttons do this.
 
 **CSV format:** one folder per row in the first column, relative to `data/`; a first row reading `path` is
-skipped.
+skipped. A CSV may hold at most 1 MB and 1,000 data rows (blank rows and the header are not counted). A longer
+one is rejected whole with a 422 before any job is created; split it into several files. The limit is per
+request: it bounds one transaction and response, not the total number of jobs that many requests can queue.
+
+**Versions (`v`):** `locate`, `axial` and `sagittal` take an optional `v`, the series' `updated_at` as read from
+`GET /api/series/{id}`. Indexing a series again changes `updated_at`. A request whose `v` is no longer the
+current version gets **409 Conflict** (`Cache-Control: no-store`) instead of data from the newer version, so a
+viewer never pairs an old slice list with a new image. The version is compared in the same query that reads the
+data. Without `v` the current version is served. The UI sends `v` with every request, and on a 409 it reloads
+the series metadata and redraws the viewer for the new version.
+
+**Image limits:** a slice may have at most 2048 × 2048 pixels (`MAX_FRAME_PIXELS`) and 4096 per side, checked from the header before
+any pixels are decoded. A PNG drawn to physical proportions may have 1 to 4096 pixels per side
+(`MAX_RENDER_SIDE`), checked before it is drawn. Series beyond either limit fail analysis, or get a 422 for the
+image, with the reason. Both sample series are 512 × 512, and their sagittal views are 512 × 830 and 512 × 878.
 
 ## Development
 
@@ -163,7 +180,23 @@ npm ci && npm run dev                     # UI on http://localhost:5173, forward
 
 **Troubleshooting.** On Linux the containers run as uid 10001 and need read access to the data
 (`chmod -R a+rX data`). `schema.sql` runs only on an empty database volume: after changing it, recreate the
-volume with `docker compose down -v` (this deletes the indexed metadata, not your DICOM files).
+volume with `docker compose down -v` (this deletes the indexed metadata, not your DICOM files), or apply the
+matching file in `backend/migrations/` to keep it.
+
+**Upgrading a database created before float32 sagittal planes.** Sagittal planes used to be stored as int16, which
+truncated fractional HU (40.75 became 40). New planes are float32, and each row records its plane's format in
+`series.sagittal_encoding`. The new code needs that column, so migrate before starting it, without deleting
+the volume:
+
+```bash
+docker compose stop worker relay api       # no old worker may write a plane during the change
+docker compose exec -T db psql -v ON_ERROR_STOP=1 -U ctviewer -d ctviewer < backend/migrations/001_sagittal_encoding.sql
+docker compose up --build -d
+```
+
+The migration runs in one transaction and is safe to run again. Existing planes are marked `int16le` and stay
+viewable as they are; they are never read as float32. Their lost fractions come back only by indexing those
+folders again from the DICOM files (Jobs → Index, or a CSV), which replaces each plane with a float32 one.
 Logs: `docker compose logs -f api worker relay`.
 
 
@@ -192,7 +225,8 @@ See `docs/design.md` for which parts of the full-service design are implemented.
 
 ## How AI was used
 
-I used Claude Code (Anthropic) throughout, as the brief encourages.
+I used Claude Code (Anthropic) for planning and implementation, and Codex (OpenAI) for review,
+documentation corrections and verification, as the brief allows.
 
 * **Planning:** I worked out the design with it: the Part 1 architecture, the database choice and how Part 2 would
   implement a slice of that design.
@@ -201,6 +235,8 @@ I used Claude Code (Anthropic) throughout, as the brief encourages.
   for the logic, `db/` for all SQL), typed records and Pydantic models at the boundaries, keyword arguments, and
   Ruff for linting and formatting. I also made the scope calls. For example, I removed a working MinIO browser
   upload after checking it against the brief, because Part 2 does not ask for it. It stays in the Part 1 design.
-* **Checking:** I had changes checked by running them, not just by reading the code: the test suite against a real PostgreSQL, the full
-  Compose stack, screenshots of the viewer at laptop and desktop sizes, and a fresh clone built with no cache
-  on empty volumes before submission.
+* **Checking:** The retained backend suite passes against a disposable PostgreSQL database (29 parameterized
+  cases from 15 test functions); Ruff and the frontend production build also pass. The API tests run jobs in
+  the test process, so they do not prove Redis or worker crash recovery. Both supplied series passed header
+  and geometry validation, and an indexed sample returned both image views through the running Compose stack.
+  A fresh-clone Docker build and browser interaction check remain separate final submission checks.

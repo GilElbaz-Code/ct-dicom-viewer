@@ -10,10 +10,11 @@ from http import HTTPStatus
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from psycopg_pool import PoolTimeout
 
 from app.api import jobs, series
 from app.db.pool import close_pool
-from app.errors import InvalidInput, NotFound
+from app.errors import Conflict, InvalidInput, NotFound
 
 
 @asynccontextmanager
@@ -35,9 +36,27 @@ def not_found(_: Request, exc: NotFound) -> JSONResponse:
     return JSONResponse(content={"detail": str(exc)}, status_code=HTTPStatus.NOT_FOUND)
 
 
+@app.exception_handler(Conflict)
+def conflict(_: Request, exc: Conflict) -> JSONResponse:
+    # no-store: once the client has the new version, a cached 409 must not answer it again.
+    return JSONResponse(
+        content={"detail": str(exc)}, status_code=HTTPStatus.CONFLICT, headers={"Cache-Control": "no-store"}
+    )
+
+
 @app.exception_handler(InvalidInput)
 def invalid_input(_: Request, exc: InvalidInput) -> JSONResponse:
     return JSONResponse(content={"detail": str(exc)}, status_code=HTTPStatus.UNPROCESSABLE_CONTENT)
+
+
+@app.exception_handler(PoolTimeout)
+def overloaded(_: Request, exc: PoolTimeout) -> JSONResponse:
+    """Every database connection stayed busy: tell the client to retry instead of hanging the request."""
+    return JSONResponse(
+        content={"detail": "The server is busy; try again shortly"},
+        status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+        headers={"Retry-After": "2"},
+    )
 
 
 @app.get("/api/health", status_code=HTTPStatus.OK, tags=["health"])

@@ -18,13 +18,21 @@ CREATE TABLE series (
     columns                 int NOT NULL,
     z_positions             float8[] NOT NULL,      -- ImagePositionPatient z of every slice, ascending
     files                   text[] NOT NULL,        -- slice files, in the same order as z_positions
-    sagittal                bytea,                  -- analysis output: mid-volume sagittal plane, int16 HU
+    sagittal                bytea,                  -- analysis output: mid-volume sagittal plane in HU
+    sagittal_encoding       text,                   -- its byte format: float32le (new) or int16le (before float32)
     source_path             text NOT NULL,
-    updated_at              timestamptz NOT NULL DEFAULT now()
+    updated_at              timestamptz NOT NULL DEFAULT now(),  -- the version: image requests can name it
+    -- A plane always carries its format, so old int16 bytes are never read as float32.
+    CONSTRAINT series_sagittal_encoding_check CHECK (
+        (sagittal IS NULL) = (sagittal_encoding IS NULL) AND sagittal_encoding IN ('float32le', 'int16le'))
 );
 
 CREATE INDEX series_slice_thickness_idx ON series (slice_thickness);
 CREATE INDEX series_study_uid_idx ON series (study_uid);
+-- Description search is ILIKE '%text%': only trigram indexes serve a leading wildcard. A BitmapOr combines the two.
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE INDEX series_study_description_trgm_idx ON series USING gin (study_description gin_trgm_ops);
+CREATE INDEX series_series_description_trgm_idx ON series USING gin (series_description gin_trgm_ops);
 
 CREATE TABLE jobs (
     id                  bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -42,10 +50,11 @@ CREATE TABLE jobs (
     finished_at         timestamptz
 );
 
-CREATE INDEX jobs_batch_id_idx ON jobs (batch_id);
+CREATE INDEX jobs_batch_id_idx ON jobs (batch_id, id DESC);  -- one batch, newest first, page by page
 CREATE INDEX jobs_expired_lease_idx ON jobs (lease_expires_at) WHERE status = 'running';
 
 -- Transactional outbox: a job and its dispatch commit together; the relay publishes due rows to Redis.
+-- A row lives while its job can still run: it is deleted when the job is done or has finally failed.
 CREATE TABLE job_outbox (
     job_id            bigint PRIMARY KEY REFERENCES jobs (id) ON DELETE CASCADE,
     next_dispatch_at  timestamptz NOT NULL DEFAULT now(),  -- publish (again) at or after this time
@@ -54,11 +63,3 @@ CREATE TABLE job_outbox (
 );
 
 CREATE INDEX job_outbox_due_idx ON job_outbox (next_dispatch_at);
-
--- Idempotent submission: repeating a request with the same Idempotency-Key header returns the jobs it created.
-CREATE TABLE idempotency_keys (
-    key         text PRIMARY KEY,
-    paths       text[] NOT NULL,                 -- the original request, so a key reused for another one is rejected
-    job_ids     bigint[] NOT NULL DEFAULT '{}',  -- filled in the same transaction that creates the jobs
-    created_at  timestamptz NOT NULL DEFAULT now()  -- the relay deletes keys after IDEMPOTENCY_KEY_HOURS
-);

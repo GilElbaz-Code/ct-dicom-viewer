@@ -1,11 +1,11 @@
 """The background job, run by the RQ worker: read a DICOM directory, analyze it, save the results.
 
-Problems with the data fail the job at once: another attempt would fail the same way. Database errors
-are retryable; PostgreSQL counts attempts and the relay re-dispatches them or recovers the expired lease.
+Problems with the data fail the job at once: another attempt would fail the same way. Database and storage
+outages are retryable; PostgreSQL counts attempts and the relay re-dispatches them or recovers the expired lease.
 """
 
 import logging
-from dataclasses import asdict
+from dataclasses import fields
 from pathlib import Path
 from uuid import uuid4
 
@@ -30,22 +30,36 @@ def run(job_id: int) -> None:
             directory = resolve_inside_data_dir(raw=claim.path)
             info = dicom.read_series(directory=directory, validate=False)
             lease.check()
-            series = {**asdict(info), "source_path": claim.path}
+            series = {f.name: getattr(info, f.name) for f in fields(info) if f.name != "headers"}
+            series["source_path"] = claim.path
             repository.save_series_metadata(claim=claim, series=series)
             dicom.validate_geometry(info=info)
             plane = dicom.sagittal(files=info.files, rows=info.rows, columns=info.columns, check=lease.check)
             lease.check()
-            repository.save_analysis_and_finish_job(claim=claim, series=series, sagittal=plane.tobytes())
+            repository.save_analysis_and_finish_job(
+                claim=claim, series=series, sagittal=plane.tobytes(), encoding=dicom.SAGITTAL_ENCODING
+            )
         except LeaseLost:
             logger.warning("Discarding stale attempt for job %s", job_id)
         except Exception as exc:
             logger.exception("Processing failed for job %s", job_id)
-            retryable = isinstance(exc, (OperationalError, InterfaceError, PoolTimeout))
+            retryable = is_transient(exc=exc)
             try:
                 repository.finish_failed_attempt(claim=claim, error=describe(exc=exc), retryable=retryable)
             except LeaseLost:
                 logger.warning("Failure from stale attempt ignored for job %s", job_id)
             # If PostgreSQL is unavailable, let the exception propagate. The relay recovers the lease later.
+
+
+# Missing or forbidden files stay missing on the next attempt; other OS errors (EIO, a stale NFS handle) may pass.
+PERMANENT_OS_ERRORS = (FileNotFoundError, PermissionError, IsADirectoryError, NotADirectoryError)
+
+
+def is_transient(exc: BaseException) -> bool:
+    """Database and storage outages are retried; problems with the data are not."""
+    if isinstance(exc, (OperationalError, InterfaceError, PoolTimeout)):
+        return True
+    return isinstance(exc, OSError) and not isinstance(exc, PERMANENT_OS_ERRORS)
 
 
 def describe(exc: BaseException) -> str:

@@ -54,13 +54,27 @@ export const nextPage = (page: { id: number }[]) => (page.length === PAGE_SIZE ?
 // The window/level range the API accepts (Width and Level in backend/app/api/series.py).
 export const WINDOW_LIMITS = { width: { min: 1, max: 10000 }, level: { min: -2000, max: 5000 } };
 
+export class ApiError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.status = status;
+  }
+}
+
+// 409: the request named an older version (`v`) of a series that was indexed again since.
+export const isStale = (error: unknown) => error instanceof ApiError && error.status === 409;
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`/api${path}`, init);
   const body = await response.json().catch(() => null);
   if (!response.ok) {
     // Our errors carry a string; FastAPI's request validation errors carry a list.
     const detail = body?.detail;
-    throw new Error(Array.isArray(detail) ? detail.map((d: { msg: string }) => d.msg).join("; ") : (detail ?? response.statusText));
+    throw new ApiError(
+      Array.isArray(detail) ? detail.map((d: { msg: string }) => d.msg).join("; ") : (detail ?? response.statusText),
+      response.status,
+    );
   }
   return body as T;
 }
@@ -76,7 +90,9 @@ export const api = {
   searchSeries: (filters: { max_slice_thickness?: number; description?: string }, beforeId?: number) =>
     request<Series[]>(`/series?${query({ ...filters, before_id: beforeId, limit: PAGE_SIZE })}`),
   getSeries: (id: number) => request<Series>(`/series/${id}`),
-  locate: (id: number, target: SliceTarget) => request<Located>(`/series/${id}/locate?${query(target)}`),
+  // `v` (updated_at as received, never re-formatted) makes the API answer 409 once the series is indexed again.
+  locate: (series: Series, target: SliceTarget) =>
+    request<Located>(`/series/${series.id}/locate?${query({ ...target, v: series.updated_at })}`),
   directories: () => request<string[]>("/directories"),
   jobs: (batchId: string | null, beforeId?: number) =>
     request<Job[]>(`/jobs?${query({ batch_id: batchId ?? undefined, before_id: beforeId, limit: PAGE_SIZE })}`),
@@ -93,15 +109,16 @@ export const api = {
   },
 };
 
-// Images are plain <img> URLs. `v` changes when a series is re-indexed, so the browser never shows a stale cached image.
+// Images are plain <img> URLs. `v` changes when a series is re-indexed, so the browser never shows a stale cached
+// image, and the API rejects a URL of an older version (409) instead of mixing it with the new one.
 export const axialUrl = (series: Series, index: number, width: number, level: number) =>
   `/api/series/${series.id}/axial/${index}?${query({ window: width, level, v: series.updated_at })}`;
 
-// An <img> cannot read why it failed, so ask the same URL again for the API's message.
+// An <img> cannot read why it failed, so ask the same URL again for the API's error.
 export const imageError = (url: string) =>
   request<unknown>(url.replace(/^\/api/, "")).then(
-    () => "The image could not be displayed",
-    (error: Error) => error.message,
+    () => new Error("The image could not be displayed"),
+    (error: Error) => error,
   );
 
 export const sagittalUrl = (series: Series, width: number, level: number) =>

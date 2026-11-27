@@ -53,11 +53,23 @@ class LocatedRecord(TypedDict):
 class PositionRecord(TypedDict):
     z_positions: list[float]
     slice_spacing: float
+    current: bool  # the requested version (updated_at), or any when none was given
+
+
+class AxialRecord(TypedDict):
+    analysis_available: bool
+    pixel_spacing: list[float] | None
+    rows: int
+    columns: int
+    file: str | None
+    current: bool
 
 
 class SagittalRecord(TypedDict):
     sagittal: bytes | None
+    sagittal_encoding: str | None  # a key of dicom.SAGITTAL_ENCODINGS
     num_slices: int
     rows: int
     pixel_spacing: list[float] | None
     slice_spacing: float
+    current: bool

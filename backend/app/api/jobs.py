@@ -1,21 +1,15 @@
 """HTTP routes for submitting DICOM directories (one, or a CSV batch) and following the jobs."""
 
 from http import HTTPStatus
-from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Header, UploadFile
+from fastapi import APIRouter, UploadFile
 
 from app.api.schemas import INVALID, BeforeId, Job, Limit, SubmitPath
 from app.services import jobs
 from app.types import JobRecord
 
 router = APIRouter(prefix="/api", tags=["jobs"])
-
-# Optional. A client that retries a submission (after a timeout, say) sends the same key and gets the same jobs back.
-IdempotencyKey = Annotated[
-    str | None, Header(min_length=1, max_length=255, description="Repeat it to repeat a request safely")
-]
 
 
 @router.get("/directories", status_code=HTTPStatus.OK, response_model=list[str])
@@ -25,15 +19,15 @@ def list_directories() -> list[str]:
 
 
 @router.post("/jobs", status_code=HTTPStatus.CREATED, response_model=Job, responses=INVALID)
-def submit_directory(body: SubmitPath, idempotency_key: IdempotencyKey = None) -> JobRecord:
+def submit_directory(body: SubmitPath) -> JobRecord:
     """Index one DICOM directory (interactive)."""
-    return jobs.submit(paths=[body.path], idempotency_key=idempotency_key)[0]
+    return jobs.submit(paths=[body.path])[0]
 
 
 @router.post("/batches", status_code=HTTPStatus.CREATED, response_model=list[Job], responses=INVALID)
-def submit_batch(file: UploadFile, idempotency_key: IdempotencyKey = None) -> list[JobRecord]:
+def submit_batch(file: UploadFile) -> list[JobRecord]:
     """Index every directory listed in a CSV (batch). All its jobs share one batch_id."""
-    return jobs.submit_csv(content=file.file.read(jobs.MAX_CSV_BYTES + 1), idempotency_key=idempotency_key)
+    return jobs.submit_csv(content=file.file.read(jobs.MAX_CSV_BYTES + 1))
 
 
 @router.get("/jobs", status_code=HTTPStatus.OK, response_model=list[Job], responses=INVALID)

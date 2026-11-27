@@ -67,7 +67,9 @@ flowchart LR
 
 `POST /api/jobs` accepts a directory under the shared data root. The Part 2 UI lists these directories.
 `POST /api/batches` accepts a UTF-8 CSV: the first column is a path, an optional `path` header is skipped, and blank
-rows are ignored. Each nonblank data row creates an independent job and outbox entry, sharing a `batch_id` and
+rows are ignored. A CSV holds at most 1,000 data rows; a longer one is rejected whole, while it is read and
+before anything is written. That limit bounds one request, not the total queue. Each nonblank data row creates an
+independent job and outbox entry, sharing a `batch_id` and
 retaining its CSV row number. An invalid directory fails its own job while other rows continue.
 
 Relative paths resolve under the configured root; absolute paths must also resolve inside it. Paths on another
@@ -85,9 +87,8 @@ sequenceDiagram
     participant W as Worker
     participant S as Source storage
     API->>DB: Commit queued job and outbox entry
-    R->>DB: Read pending outbox
-    R->>Q: Publish job ID
-    R->>DB: Record publication
+    R->>DB: Select due outbox rows, record dispatch and commit
+    R->>Q: Publish job IDs outside the transaction
     Q->>W: Deliver job ID
     W->>DB: Acquire exclusive lease and attempt token
     W->>S: Read DICOM headers
@@ -150,7 +151,13 @@ The browser polls pending work and reloads durable history on return.
   modality, pixel spacing, slice thickness, spacing between slices, number of slices, rows and columns. Spacing
   measured from the positions is shown next to the header value when the tag is missing or disagrees.
 * The window defaults to width 400 and level 40, the width must be positive, and a change applies to both views.
-  The analysis stores Hounsfield values, not a windowed image, so changing the window only re-renders PNGs.
+  The analysis stores Hounsfield values as float32, keeping fractional values from RescaleSlope/Intercept as
+  the axial view does, not a windowed image, so changing the window only re-renders PNGs. Each plane records its
+  encoding; planes written as int16 by earlier versions stay readable after `backend/migrations/001`.
+* Location and image requests name the metadata version they were built from (`v` = `updated_at`). After a
+  re-index, a stale request gets 409 and the viewer reloads the series instead of mixing versions.
+* Header sizes are bounded before allocation: at most 2048 × 2048 pixels per decoded slice, and 1 to 4096
+  pixels per side of a rendered PNG. Larger or degenerate sizes are rejected with a reason.
 
 Part 2 now validates standard axial orientation, matching dimensions and pixel spacing, aligned in-plane origins,
 and approximately uniform z spacing before analysis. It rejects unsupported geometry with a reason while retaining
@@ -161,15 +168,19 @@ readable metadata. It does not perform general DICOM reconstruction or resample 
 PostgreSQL is the source of truth and queue delivery is at least once. The full-service contract below requires
 application recovery logic in addition to RQ:
 
-* **Dispatch:** the relay publishes committed outbox entries and retries queue outages with backoff. A crash after
-  publication but before recording it may duplicate delivery. The reconciler also republishes jobs still queued
+* **Dispatch:** the relay marks a batch of committed outbox entries published, commits, then publishes them, so no
+  database lock waits on Redis. A queue outage returns the batch to the outbox; a relay crash between commit and
+  publication delays dispatch until the next republish. The reconciler also republishes jobs still queued
   without progress, covering loss of an already-published queue message.
 * **Exclusive execution:** atomically acquire a renewable lease with a new attempt token. A live lease prevents
   another delivery from claiming that job. Every metadata, result and status write checks the token and valid
   lease; stale workers cannot commit. Workers stop on renewal failure. Lease expiry can briefly overlap physical
   execution, but only the current attempt may publish changes.
 * **Retries:** permanent input errors fail immediately. Transient database/storage errors and interrupted attempts
-  retry with backoff, up to three processing attempts, with a 30-minute timeout per attempt. Waiting for queue
+  retry with backoff, up to three processing attempts, with a 30-minute deadline per attempt. The cooperative
+  deadline check stops processing shortly before that deadline and records a terminal timeout failure. If a
+  blocked decoder or a killed process prevents that check, lease recovery treats the attempt as interrupted
+  and may retry it within the same attempt budget. Waiting for queue
   availability consumes no attempt. PostgreSQL stores attempt counts; reconciliation owns retry dispatch so
   independent queue retries cannot reset the budget.
 * **Worker interruption:** expired leases are retried or marked failed after the attempt budget. Completed jobs
@@ -200,9 +211,9 @@ per worker. The sagittal algorithm
 retains headers, one decoded slice and the output plane rather than the entire volume; actual memory depends on
 image dimensions and decoder buffers. API replicas share persistent storage and PostgreSQL.
 
-At a million series, results would move to object storage, substring searches would get a trigram index, and job
+At a million series, results would move to object storage (substring searches already have trigram indexes), and job
 history would be archived or partitioned (pagination is already keyset). Studies would get their own table if
-repeated fields become costly, migrations would become versioned, and replicas or a search service would come only
+repeated fields become costly, the existing numbered migrations would gain automated version tracking, and replicas or a search service would come only
 after measurements show the need. The
 [README](../README.md#why-postgresql) contains the database rationale and scaling discussion required by Part 2.
 
@@ -210,13 +221,15 @@ after measurements show the need. The
 
 The full service uses institutional SSO, accepting identity headers only from a trusted proxy. The initial group
 shares access; separate groups would require authorization on metadata, jobs, sources and results. Signed URLs
-are scoped to one upload session. Sealing copies the verified objects into a worker-readable prefix that upload
-credentials cannot write to, so a leaked upload URL cannot change a series after it was checked. Manifest paths are
+are scoped to one upload session. Sealing copies specific object versions into a worker-readable prefix that upload
+credentials cannot write to and verifies the sealed copies against the manifest before accepting the job. This
+prevents an overwrite during verification from changing the accepted source. Manifest paths are
 validated, and file counts and total bytes are bounded.
 
 Shared paths are resolved, symlinks included, and must stay inside the data root, which is mounted read-only.
-Containers run as non-root, secrets come from a secret manager, and all traffic is HTTPS. Logs carry no patient
-metadata or pixels, and logs and backups are protected as research data. Restores of both PostgreSQL and the
+In production, containers would run as non-root, secrets would come from a secret manager, and traffic would use
+TLS. Application logs should avoid patient metadata and pixels; exception traces can still contain paths or
+header values, so access and retention must be restricted. Logs and backups are protected as research data. Restores of both PostgreSQL and the
 source files are tested, since a backup that was never restored is not known to work.
 
 Monitoring covers API errors and latency, the oldest pending outbox entry, the oldest queued job, expired leases,
@@ -241,9 +254,7 @@ notes; relay, lease and upload monitoring described here are target additions.
 
 ## Current Part 2 implementation boundary
 
-This inventory describes the current implementation. Backend tests run against real PostgreSQL and cover metadata
-retention, the viewer APIs, concurrent claims, stale-attempt rejection, bounded retries and relay crash recovery.
-Part 2 reads series from the mounted data folder only. Browser upload to object storage is part of the target
+This inventory describes the current implementation. Part 2 reads series from the mounted data folder only. Browser upload to object storage is part of the target
 design above, not of the implementation.
 
 | Capability | Current implementation and remaining work |
@@ -262,3 +273,17 @@ design above, not of the implementation.
 
 The remaining gaps (browser upload, CSV row numbers, job-specific results, study-level search, operations) do not
 change the architecture; each is an addition to the existing tables and endpoints.
+
+### Automated tests
+
+The backend suite is deliberately small: 15 tests, one per behavior the brief or a past bug made important.
+
+| Level | What it checks |
+|---|---|
+| Unit (`test_dicom.py`, `test_services.py`) | Slices sorted by z, not file name; the sagittal plane takes the middle column of every slice in z order; window/level maps level ± width/2 to black and white; nearest slice for a z (ties pick the lower index, ends clamp) or an index, and invalid requests rejected; CSV first column, optional header, blank rows and the 1,000-row limit; concurrent first requests build one connection pool |
+| API on a disposable PostgreSQL (`test_api.py`) | Index, search by thickness and description, locate, and both PNGs; each CSV row fails on its own with its reason; metadata stays searchable when analysis fails; a request naming a replaced version gets 409, not a mix of versions; fractional HU are stored as float32 and window like the axial slice; an expired attempt cannot write after recovery; the migration keeps int16 planes readable |
+
+The API tests run each job in the test process, with no Redis or worker; they skip unless `TEST_DATABASE_URL` is
+set, because they drop and recreate the tables. Queue outages, relay crash recovery, retry limits, duplicate
+claims and the browser's reload after a 409 are designed and implemented as described above, but have no
+automated tests.

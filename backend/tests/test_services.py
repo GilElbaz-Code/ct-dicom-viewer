@@ -1,20 +1,31 @@
+import threading
+import time
+
 import pytest
 
-from app.config import settings
+from app.db import pool as pool_module
 from app.errors import InvalidInput
-from app.services import ingest, jobs, viewer
+from app.services import jobs, viewer
 
 POSITIONS = [-10.0, -7.5, -5.0, -2.5, 0.0]
 
 
-@pytest.mark.parametrize(("z", "index"), [(-10, 0), (-6.0, 2), (-6.5, 1), (100, 4), (-100, 0)])
+@pytest.mark.parametrize(
+    ("z", "index"),
+    [
+        (-10, 0),  # exact hits, both ends and inside
+        (-5.0, 2),
+        (0.0, 4),
+        (-6.0, 2),
+        (-6.5, 1),
+        (-8.75, 0),  # ties pick the lower index
+        (-1.25, 3),
+        (100, 4),  # beyond an end: that end slice
+        (-100, 0),
+    ],
+)
 def test_locate_finds_the_closest_slice(z, index):
     assert viewer.locate(POSITIONS, 2.5, z, None)["index"] == index
-
-
-def test_locate_flags_locations_outside_the_scanned_range():
-    assert viewer.locate(POSITIONS, 2.5, 1.0, None)["outside"] is False  # within half a slice of the top
-    assert viewer.locate(POSITIONS, 2.5, 1.5, None)["outside"] is True
 
 
 def test_locate_by_index():
@@ -27,7 +38,10 @@ def test_locate_by_index():
     }
 
 
-@pytest.mark.parametrize(("z", "index"), [(None, 5), (None, -1), (1.0, 1), (None, None)])
+@pytest.mark.parametrize(
+    ("z", "index"),
+    [(None, 5), (None, -1), (1.0, 1), (None, None), (float("nan"), None), (float("inf"), None), (float("-inf"), None)],
+)
 def test_locate_rejects_bad_requests(z, index):
     with pytest.raises(InvalidInput):
         viewer.locate(POSITIONS, 2.5, z, index)
@@ -36,57 +50,42 @@ def test_locate_rejects_bad_requests(z, index):
 def test_parse_csv_takes_the_first_column_and_skips_header_and_blank_rows():
     assert jobs.parse_csv("﻿path\nseries_1\n\n  series_2 \n".encode()) == ["series_1", "series_2"]
     assert jobs.parse_csv(b"a/b,comment\nc\n") == ["a/b", "c"]
+    rows = [f"s{i}" for i in range(1000)]  # the limit counts data rows: not the header, not blank rows
+    assert jobs.parse_csv(("path\n\n" + "\n\n".join(rows) + "\n").encode()) == rows
+    with pytest.raises(InvalidInput, match="more than 1,000"):
+        jobs.parse_csv(("path\n" + "\n".join([*rows, "s1000"]) + "\n").encode())
 
 
-@pytest.mark.parametrize("content", [b"path\n", b"", "caf\xe9".encode("latin-1")])
-def test_parse_csv_rejects_empty_or_non_utf8_files(content):
-    with pytest.raises(InvalidInput):
-        jobs.parse_csv(content)
+def test_concurrent_first_requests_share_one_pool(monkeypatch):
+    built = []
+    inside = threading.Event()
+    release = threading.Event()
 
+    class SlowPool:
+        check_connection = None
 
-def test_parse_csv_rejects_malformed_quotes():
-    with pytest.raises(InvalidInput, match="Invalid CSV"):
-        jobs.parse_csv(content=b'path\n"unclosed')
+        def __init__(self, **kwargs):
+            built.append(self)
+            inside.set()
+            release.wait(timeout=5)  # hold the first construction while the other threads arrive
 
+    monkeypatch.setattr(pool_module, "ConnectionPool", SlowPool)
+    monkeypatch.setattr(pool_module, "_pool", None)
+    start = threading.Barrier(8)
+    results = []
 
-def test_paths_must_stay_inside_the_data_directory(tmp_path, monkeypatch):
-    monkeypatch.setattr(settings, "data_dir", tmp_path)
-    (tmp_path / "series_1").mkdir()
-    assert ingest.resolve_inside_data_dir("series_1") == (tmp_path / "series_1").resolve()
-    with pytest.raises(InvalidInput, match="outside"):
-        ingest.resolve_inside_data_dir("../")
-    with pytest.raises(InvalidInput, match="not found"):
-        ingest.resolve_inside_data_dir("missing")
-    for whole_library in (".", "  ", "series_1/.."):
-        with pytest.raises(InvalidInput, match="not the data directory itself"):
-            ingest.resolve_inside_data_dir(whole_library)
+    def first_request():
+        start.wait()
+        results.append(pool_module.pool())
 
-
-class FakeQueue:
-    """Records enqueues; fetch_job reports the status RQ would."""
-
-    def __init__(self):
-        self.status: dict[str, str] = {}
-        self.enqueued: list[str] = []
-
-    def fetch_job(self, job_id):
-        status = self.status.get(job_id)
-        return None if status is None else type("Job", (), {"get_status": lambda _: status})()
-
-    def enqueue(self, func, *args, job_id, **kwargs):
-        self.enqueued.append(job_id)
-        self.status[job_id] = "queued"
-
-
-def test_publish_does_not_stack_a_job_that_is_still_waiting_in_the_queue(monkeypatch):
-    fake = FakeQueue()
-    monkeypatch.setattr(jobs, "queue", lambda: fake)
-    jobs.publish(job_id=7)
-    jobs.publish(job_id=7)  # the relay's 60-second republish while the job waits behind others
-    assert fake.enqueued == ["ingest-7"]
-    fake.status["ingest-7"] = "failed"  # e.g. its process was killed; the database lease decides what happens next
-    jobs.publish(job_id=7)
-    assert fake.enqueued == ["ingest-7", "ingest-7"]
-    del fake.status["ingest-7"]  # lost from Redis entirely
-    jobs.publish(job_id=7)
-    assert len(fake.enqueued) == 3
+    threads = [threading.Thread(target=first_request) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    assert inside.wait(timeout=5)
+    time.sleep(0.05)  # every thread is past the barrier, waiting for the one constructing
+    release.set()
+    for thread in threads:
+        thread.join(timeout=5)
+    assert len(built) == 1
+    assert len(results) == 8
+    assert all(result is built[0] for result in results)

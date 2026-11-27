@@ -26,6 +26,9 @@ NOT_FOUND: dict[int | str, dict[str, Any]] = {
 INVALID: dict[int | str, dict[str, Any]] = {
     HTTPStatus.UNPROCESSABLE_CONTENT: {"model": Error, "description": "Invalid input, with the reason"}
 }
+CONFLICT: dict[int | str, dict[str, Any]] = {
+    HTTPStatus.CONFLICT: {"model": Error, "description": "`v` names an older version: the series was indexed again"}
+}
 PNG: dict[int | str, dict[str, Any]] = {HTTPStatus.OK: {"content": {"image/png": {}}, "description": "A PNG image"}}
 
 
