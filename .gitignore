@@ -12,5 +12,3 @@ dist/
 *.tsbuildinfo
 .idea
 .vscode/
-# assignment brief; not part of the repository
-Backend_Engineer_Home_Assignment.pdf
