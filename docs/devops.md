@@ -56,17 +56,8 @@ I would use GitHub Actions with three parallel jobs on every push and pull reque
 This pipeline is a proposal; a GitHub Actions workflow is not included in the submission.
 
 For a deployed service, CD on `main` would push both images to a registry tagged with the commit
-SHA and deploys that tag to staging (`helm upgrade --install`). The same smoke test runs there, then the same tag
+SHA and deploy that tag to staging. The same smoke test runs there, then the same tag
 is promoted to production. Dependabot or Renovate keeps dependencies current, and Trivy scans the images.
-
-## Deploying on Kubernetes or OpenShift
-
-This is a deployment option, not included infrastructure. The application services would use Deployments behind
-an Ingress (a Route on OpenShift), with managed PostgreSQL and Redis and shared DICOM storage. A deployment Job
-would apply pending versioned migrations before a compatible application release; `schema.sql` is only for
-initial database creation. Worker autoscaling could use queue depth and oldest-job age, with limits established
-from storage bandwidth and database connection measurements. OpenShift deployment would also require validating
-arbitrary-UID permissions and using an unprivileged nginx image; a non-root Dockerfile alone does not prove compatibility.
 
 ## Scaling
 
@@ -77,7 +68,7 @@ scales vertically, or becomes a managed service.
 | Component | How it scales | Where the limit is, and the next step |
 |---|---|---|
 | `worker` | One job at a time per worker. Only one attempt holds a valid PostgreSQL lease; stale attempts cannot commit. Retries can execute a job again, and lease expiry can briefly overlap physical execution. | Each job process has a pool capped at 10 connections. Budget connections across API, workers and relay before increasing replicas; add PgBouncer if needed. Shared storage bandwidth also limits throughput. |
-| `api` | Stateless replicas behind nginx or an Ingress. | PNG rendering uses CPU. Browsers may reuse images for five minutes under `Cache-Control: private, max-age=300`; shared caches must not store them. Requests include `v=updated_at`. A stale request reaching the API gets 409 with `no-store`, triggering a viewer refresh. This does not purge previously cached images. |
+| `api` | Stateless replicas behind nginx. | PNG rendering uses CPU. Browsers may reuse images for five minutes under `Cache-Control: private, max-age=300`; shared caches must not store them. Requests include `v=updated_at`. A stale request reaching the API gets 409 with `no-store`, triggering a viewer refresh. This does not purge previously cached images. |
 | `relay` | A pass handles up to 100 jobs using batched Redis operations: status lookup followed by enqueueing when needed. Full passes run back to back; otherwise it polls every two seconds. | `FOR UPDATE SKIP LOCKED` separates concurrently selected batches. Delivery can repeat, so worker claims and fencing remain necessary. |
 | `redis` | One primary stores RQ job records and queue IDs with append-only persistence. Replicas can support failover. | If Redis loses data, the durable PostgreSQL outbox republishes queued work and leases recover interrupted attempts. RQ-only history may be lost. Monitor queue depth, memory and persistence health. |
 | `db` | Vertical first. A managed PostgreSQL with a read replica for search. | Sagittal planes (float32, ~700 KB each) in `bytea` move to object storage at about a million series, while "description contains" search already has `pg_trgm` indexes. See the README. |
@@ -90,14 +81,14 @@ scales vertically, or becomes a managed service.
 * CI would need none: its PostgreSQL is a throwaway service container. Registry or cloud credentials would be the
   CI system's encrypted secrets. Deploying to a cloud would use OIDC federation instead of
   long-lived keys.
-* In production, secrets come from a secret manager (AWS Secrets Manager, Vault, or Kubernetes Secrets) as
+* In production, secrets come from a secret manager (AWS Secrets Manager or Vault) as
   environment variables or mounted files, and are rotated there.
 
 ## Knowing the service is healthy in production
 
 * **Liveness:** `GET /api/health` (the compose healthcheck) and nginx answering on `/`. An external uptime check
-  hits the public URL. `/api/health` only shows the process is up and never touches PostgreSQL or Redis. A
-  API readiness would check PostgreSQL: submissions remain durable during Redis outages. Redis availability
+  hits the public URL. `/api/health` only shows the process is up and never touches PostgreSQL or Redis.
+  A readiness check would query PostgreSQL: submissions remain durable during Redis outages. Redis availability
   would be monitored separately for workers and relay, along with their progress.
 * **Work is flowing.** The real signal for this service:
   * Queue depth and the age of the oldest queued task (`rq info`, or Redis metrics).

@@ -3,9 +3,9 @@ import time
 
 import pytest
 
-from app.db import pool as pool_module
-from app.errors import InvalidInput
-from app.services import jobs, viewer
+from core.errors import InvalidInput
+from db import pool as pool_module
+from services import jobs, viewer
 
 POSITIONS = [-10.0, -7.5, -5.0, -2.5, 0.0]
 

@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from app.services import dicom
+from services import dicom
 from tests.conftest import write_slice
 
 

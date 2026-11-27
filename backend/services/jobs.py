@@ -9,11 +9,11 @@ from redis import Redis
 from rq import Queue
 from rq.job import Job, JobStatus
 
-from app.config import settings
-from app.db import repository
-from app.errors import InvalidInput
-from app.services import ingest
-from app.types import JobRecord
+from core.config import settings
+from core.errors import InvalidInput
+from core.types import JobRecord
+from db import repository
+from services import ingest
 
 MAX_CSV_BYTES = 1_000_000
 # Data rows per CSV (one job each). Bounds one request's transaction, response and queue additions; it does not

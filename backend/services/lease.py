@@ -1,15 +1,13 @@
 """Heartbeat a database lease independently of long-running pixel decoding."""
 
-import logging
 import time
 from threading import Event, Thread
 from types import TracebackType
 
-from app.config import settings
-from app.db import repository
-from app.errors import InvalidInput, LeaseLost
-
-logger = logging.getLogger(__name__)
+from core.config import settings
+from core.errors import InvalidInput, LeaseLost
+from core.logger import logger
+from db import repository
 
 HEARTBEAT_JOIN_SECONDS = 5  # how long leaving the lease waits for a renewal in flight
 DEADLINE_SHARE = 0.95  # stop at 95% of JOB_TIMEOUT_SECONDS, so the timeout is still recorded under a valid lease

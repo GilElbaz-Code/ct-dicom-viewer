@@ -7,7 +7,7 @@ from psycopg import Connection
 from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
 
-from app.config import settings
+from core.config import settings
 
 POOL_SIZE = 10
 POOL_WAIT_SECONDS = 5  # a request waiting longer for a connection gets 503 instead of hanging

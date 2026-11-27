@@ -2,9 +2,9 @@
 
 from collections.abc import Callable
 
-from app.config import settings
-from app.db.pool import pool
-from app.db.repository import settle_attempts
+from core.config import settings
+from db.pool import pool
+from db.repository import settle_attempts
 
 BATCH = 100  # rows per relay pass; a full pass makes the relay go again at once
 PUBLISH_RETRY_SECONDS = 5  # how long a failed publication waits before the relay tries Redis again

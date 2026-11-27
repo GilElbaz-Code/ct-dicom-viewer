@@ -5,9 +5,9 @@ from uuid import UUID
 
 from fastapi import APIRouter, UploadFile
 
-from app.api.schemas import INVALID, BeforeId, Job, Limit, SubmitPath
-from app.services import jobs
-from app.types import JobRecord
+from api.schemas import INVALID, BeforeId, Job, Limit, SubmitPath
+from core.types import JobRecord
+from services import jobs
 
 router = APIRouter(prefix="/api", tags=["jobs"])
 

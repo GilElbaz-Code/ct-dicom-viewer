@@ -1,16 +1,13 @@
-"""Run with python -m app.relay; PostgreSQL owns retries and recovery."""
+"""Run with python -m services.relay to publish jobs and recover expired leases."""
 
-import logging
 import signal
 from threading import Event
 from types import FrameType
 
-from app.db import dispatch
-from app.db.pool import close_pool
-from app.services import jobs
-
-logger = logging.getLogger(__name__)
-
+from core.logger import logger
+from db import dispatch
+from db.pool import close_pool
+from services import jobs
 
 POLL_SECONDS = 2  # the pause between passes when there is no backlog
 
@@ -23,7 +20,6 @@ def tick() -> bool:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO)
     stop = Event()
 
     def shutdown(signum: int, frame: FrameType | None) -> None:

@@ -45,8 +45,7 @@ Needs only Docker with Compose v2 (Docker Desktop, or Docker Engine 24+).
    `chest` (a case-insensitive match on the study or series description).
 
 Stop with `docker compose down`. Add `-v` to also delete the database.
-More workers process more series at once: `docker compose up -d --scale worker=6`. Autoscaling on
-Kubernetes is described in [docs/devops.md](docs/devops.md#deploying-on-kubernetes-or-openshift).
+More workers process more series at once: `docker compose up -d --scale worker=6`.
 
 ## Why PostgreSQL
 
@@ -94,22 +93,24 @@ The backend has three layers, and each only calls the one below it:
 
 | Layer | Folder | Rule |
 |---|---|---|
-| API | `backend/app/api/` | HTTP only: validate input, call one service, return a model or a PNG |
-| Logic | `backend/app/services/` | What the app does; no FastAPI, no SQL |
-| Data | `backend/app/db/` | Every SQL statement; each function is one transaction |
+| API | `backend/api/` | HTTP only: validate input, call one service, return a model or a PNG |
+| Logic | `backend/services/` | What the app does; no FastAPI, no SQL |
+| Data | `backend/db/` | Every SQL statement; each function is one transaction |
+
+`backend/main.py` is the FastAPI entry point. Shared settings, errors, data types, and logging live in `backend/core/`.
 
 ### Code reading order
 
 | File | What it does |
 |---|---|
 | `backend/schema.sql` | Three tables: `series` (metadata, slice positions, analysis output), `jobs` (status, attempts, lease) and `job_outbox` (dispatch) |
-| `backend/app/services/dicom.py` | Read and validate a folder's headers; HU conversion; sagittal; window/level to PNG |
-| `backend/app/services/ingest.py` | The background job: claim (skips duplicates) → path check → headers → sagittal → save |
-| `backend/app/services/jobs.py` | Submit folders or a CSV; `publish` puts a job ID on RQ (called by the relay) |
-| `backend/app/relay.py`, `db/dispatch.py` | Outbox relay: publish committed jobs, recover expired leases |
-| `backend/app/db/repository.py` | All SQL |
-| `backend/app/services/viewer.py` | Closest slice to a location; axial and sagittal PNGs |
-| `backend/app/api/*.py`, `main.py` | Routes, response models, error → HTTP status |
+| `backend/services/dicom.py` | Read and validate a folder's headers; HU conversion; sagittal; window/level to PNG |
+| `backend/services/ingest.py` | The background job: claim (skips duplicates) → path check → headers → sagittal → save |
+| `backend/services/jobs.py` | Submit folders or a CSV; `publish` puts a job ID on RQ (called by the relay) |
+| `backend/services/relay.py`, `backend/db/dispatch.py` | Outbox relay: publish committed jobs, recover expired leases |
+| `backend/db/repository.py` | All SQL |
+| `backend/services/viewer.py` | Closest slice to a location; axial and sagittal PNGs |
+| `backend/api/*.py`, `backend/main.py` | Routes, response models, error → HTTP status (`api/errors.py`) |
 | `docker-compose.yml` | db, redis, api, worker, relay, web |
 | `frontend/src/api.ts` | Typed calls to the API |
 | `frontend/src/pages/Viewer.tsx`, `Jobs.tsx`, `Search.tsx` | The three screens |
@@ -164,9 +165,9 @@ uv sync                                   # Python 3.13+ and dependencies into .
 uv run pytest                             # unit tests
 TEST_DATABASE_URL=postgresql://postgres:pw@localhost:5432/postgres uv run pytest   # + API tests (drops tables!)
 uv run ruff check . && uv run ruff format --check .
-uv run uvicorn app.main:app --reload      # API on :8000 (needs DATABASE_URL, REDIS_URL, DATA_DIR)
-uv run rq worker                          # worker (Linux/macOS; RQ needs fork)
-uv run python -m app.relay                # relay: without it jobs stay queued
+uv run uvicorn main:app --reload      # API on :8000 (needs DATABASE_URL, REDIS_URL, DATA_DIR)
+uv run rq worker --job-class services.worker.IngestJob  # worker (Linux/macOS; RQ needs fork)
+uv run python -m services.relay           # relay: without it jobs stay queued
 
 cd frontend
 npm ci && npm run dev                     # UI on http://localhost:5173, forwards /api to :8000
@@ -235,8 +236,10 @@ documentation corrections and verification, as the brief allows.
   for the logic, `db/` for all SQL), typed records and Pydantic models at the boundaries, keyword arguments, and
   Ruff for linting and formatting. I also made the scope calls. For example, I removed a working MinIO browser
   upload after checking it against the brief, because Part 2 does not ask for it. It stays in the Part 1 design.
-* **Checking:** The retained backend suite passes against a disposable PostgreSQL database (29 parameterized
-  cases from 15 test functions); Ruff and the frontend production build also pass. The API tests run jobs in
+* **Checking:** The retained backend suite passes against a disposable PostgreSQL database (31 parameterized
+  cases from 16 test functions); Ruff and the frontend production build also pass. The API tests run jobs in
   the test process, so they do not prove Redis or worker crash recovery. Both supplied series passed header
   and geometry validation, and an indexed sample returned both image views through the running Compose stack.
-  A fresh-clone Docker build and browser interaction check remain separate final submission checks.
+  A fresh clone of this repository, started with `docker compose up --build`, indexed both samples from
+  `examples/sample_batch.csv`, reported the failed rows of `examples/batch_with_errors.csv` with their reasons,
+  answered the search queries and served both image views.

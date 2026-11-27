@@ -49,13 +49,13 @@ services:
 
   worker:
     <<: *backend
-    command: ["sh", "-c", "exec rq worker --url \"$$REDIS_URL\""]  # $$: expanded by sh in the container, not by compose
+    command: ["sh", "-c", "exec rq worker --job-class services.worker.IngestJob --url \"$$REDIS_URL\""]  # $$ is expanded by sh
     deploy:
       replicas: 2  # two series are processed at the same time
 
   relay:
     <<: *backend
-    command: ["python", "-m", "app.relay"]
+    command: ["python", "-m", "services.relay"]
 
   web:
     build: ./frontend

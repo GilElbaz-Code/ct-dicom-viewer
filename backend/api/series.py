@@ -6,9 +6,9 @@ from typing import Annotated
 
 from fastapi import APIRouter, Path, Query, Response
 
-from app.api.schemas import CONFLICT, INVALID, NOT_FOUND, PNG, BeforeId, Limit, Located, Series
-from app.services import viewer
-from app.types import LocatedRecord, SeriesRecord
+from api.schemas import CONFLICT, INVALID, NOT_FOUND, PNG, BeforeId, Limit, Located, Series
+from core.types import LocatedRecord, SeriesRecord
+from services import viewer
 
 router = APIRouter(prefix="/api/series", tags=["series"])
 

@@ -14,7 +14,7 @@ from pydicom.dataset import Dataset
 from pydicom.errors import InvalidDicomError
 from pydicom.pixels import apply_modality_lut
 
-from app.errors import InvalidInput
+from core.errors import InvalidInput
 
 # Every image file must carry the geometry the viewer needs; one without it is reported, not skipped.
 REQUIRED_TAGS = ("SeriesInstanceUID", "ImagePositionPatient", "ImageOrientationPatient", "Rows", "Columns")

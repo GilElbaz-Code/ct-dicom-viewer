@@ -15,12 +15,12 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from app.config import settings
-from app.db import dispatch, repository
-from app.db.pool import close_pool, pool
-from app.errors import LeaseLost
-from app.main import app
-from app.services import dicom, ingest
+from core.config import settings
+from core.errors import LeaseLost
+from db import dispatch, repository
+from db.pool import close_pool, pool
+from main import app
+from services import dicom, ingest
 from tests.conftest import write_slice
 
 DATABASE_URL = os.environ.get("TEST_DATABASE_URL")

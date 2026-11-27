@@ -4,7 +4,6 @@ Problems with the data fail the job at once: another attempt would fail the same
 outages are retryable; PostgreSQL counts attempts and the relay re-dispatches them or recovers the expired lease.
 """
 
-import logging
 from dataclasses import fields
 from pathlib import Path
 from uuid import uuid4
@@ -12,13 +11,12 @@ from uuid import uuid4
 from psycopg import InterfaceError, OperationalError
 from psycopg_pool import PoolTimeout
 
-from app.config import settings
-from app.db import repository
-from app.errors import InvalidInput, LeaseLost
-from app.services import dicom
-from app.services.lease import Lease
-
-logger = logging.getLogger(__name__)
+from core.config import settings
+from core.errors import InvalidInput, LeaseLost
+from core.logger import logger
+from db import repository
+from services import dicom
+from services.lease import Lease
 
 
 def run(job_id: int) -> None:

@@ -9,11 +9,15 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-cache
 ENV PATH=/app/.venv/bin:$PATH PYTHONUNBUFFERED=1
 
-COPY app ./app
+COPY api ./api
+COPY core ./core
+COPY db ./db
+COPY services ./services
+COPY main.py ./
 
 # Never run as root; the DICOM folder is mounted read-only anyway.
 RUN useradd --uid 10001 --no-create-home app
 USER app
 
 EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

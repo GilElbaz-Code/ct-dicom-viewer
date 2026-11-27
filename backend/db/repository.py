@@ -8,10 +8,10 @@ from uuid import UUID
 from psycopg import Connection
 from psycopg.rows import DictRow
 
-from app.config import settings
-from app.db.pool import pool
-from app.errors import LeaseLost
-from app.types import AxialRecord, JobRecord, PositionRecord, SagittalRecord, SeriesRecord
+from core.config import settings
+from core.errors import LeaseLost
+from core.types import AxialRecord, JobRecord, PositionRecord, SagittalRecord, SeriesRecord
+from db.pool import pool
 
 JOB_COLUMNS = "id, path, batch_id, status, error, series_id, created_at, finished_at, attempt_count, stage"
 
