@@ -1,4 +1,5 @@
-# Runs on every push and pull request: lint, tests against a real PostgreSQL, frontend type-check, image builds.
+# Runs on every push and pull request: lint, tests against a real PostgreSQL, frontend type-check, and the whole
+# stack started from scratch with Docker Compose and checked end to end.
 name: CI
 
 on:
@@ -43,8 +44,49 @@ jobs:
       - run: npm ci
       - run: npm run build  # tsc, then vite
 
-  images:
+  # The README's "run it from scratch" on a clean machine: build the images, start the stack, index a series.
+  e2e:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: docker compose build
+      - uses: astral-sh/setup-uv@v6
+      - name: Write a synthetic series into data/
+        working-directory: backend
+        run: |
+          uv sync --frozen
+          uv run python -c "
+          from pathlib import Path
+          from tests.conftest import write_slice
+          folder = Path('../data/ci_phantom')
+          folder.mkdir()
+          for i in range(40):  # z = -50 ... 47.5 mm, 2.5 mm apart, 1 mm thick
+              write_slice(folder / f'{i:03}.dcm', z=-50 + 2.5 * i, value=10 * i, size=64)
+          "
+      - name: Start the stack
+        run: docker compose up --build -d --wait --wait-timeout 300
+      - name: Smoke test through nginx
+        run: |
+          set -euo pipefail
+          api=http://localhost:8080/api
+          curl -fsS http://localhost:8080/ | grep -q 'id="root"'
+          job=$(curl -fsS -X POST "$api/jobs" -H 'Content-Type: application/json' -d '{"path": "ci_phantom"}' | jq -r .id)
+          show() { curl -fsS "$api/jobs" | jq -c --argjson id "$job" '.[] | select(.id == $id)'; }
+          for _ in $(seq 60); do
+            status=$(show | jq -r .status)
+            [ "$status" = done ] || [ "$status" = failed ] && break
+            sleep 2
+          done
+          show
+          [ "$status" = done ]
+          series=$(show | jq -r .series_id)
+          curl -fsS "$api/series?max_slice_thickness=1.5" | jq -e --argjson id "$series" 'any(.[]; .id == $id)'
+          curl -fsS "$api/series/$series/locate?z=0.4" | jq -e '.index == 20'
+          for image in axial/20 sagittal; do
+            curl -fsS -o /dev/null -w "$image: %{content_type}\n" "$api/series/$series/$image" | grep image/png
+          done
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs --no-color --tail 200
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

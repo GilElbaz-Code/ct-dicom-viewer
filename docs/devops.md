@@ -46,11 +46,14 @@ All services share the compose network and find each other by service name:
    service container and `TEST_DATABASE_URL` set, so the API tests run as well as the unit tests (which use
    small synthetic DICOM series written with pydicom).
 2. **frontend:** `npm ci` and `npm run build`, which type-checks before bundling.
-3. **images:** `docker compose build`, so a broken Dockerfile fails the pull request.
+3. **e2e:** the README's "run it from scratch" on a clean runner. It writes a small synthetic series into
+   `data/`, runs `docker compose up --build --wait`, then goes through nginx: indexes the series, waits for the
+   job to finish, checks that the thinner-than-1.5 mm query finds it and that a location picks the right slice,
+   and fetches both PNGs. A broken Dockerfile, compose file or service wiring fails the pull request.
 
-What I would add for a deployed service: on `main`, CD pushes both images to a registry tagged with the commit SHA and deploys that tag to staging
-(`helm upgrade --install`). It runs a smoke test there (index a synthetic series, fetch both images), then promotes
-the same tag to production. Dependabot or Renovate keeps dependencies current, and Trivy scans the images.
+What I would add for a deployed service: on `main`, CD pushes both images to a registry tagged with the commit
+SHA and deploys that tag to staging (`helm upgrade --install`). The same smoke test runs there, then the same tag
+is promoted to production. Dependabot or Renovate keeps dependencies current, and Trivy scans the images.
 
 ## Deploying on Kubernetes or OpenShift
 
